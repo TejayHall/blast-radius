@@ -48,7 +48,13 @@ CLASS_LOADED_FIXTURES = {
 # Giant tests (>= 9 s): "drop" = release on clean cheap evidence, "probe" = also require a passing probe of
 # test_execute_tpcds on a few queries, "keep" = always include.
 GIANT_MODE = os.environ.get("BR_GIANT_MODE", "keep")
-DROP_GIANTS = GIANT_MODE == "drop"
+# "smart" = "drop", except where a giant checks behaviour that no cheap test sees: test_execute_tpcds for the
+# executor's own code (planner, Python executor and its code generator), test_max_nodes for the parser's node
+# limit.
+DROP_GIANTS = GIANT_MODE in ("drop", "smart")
+MAXN_TEST = "tests/test_parser.py::TestParser::test_max_nodes"
+EXEC_SPECIFIC = ("sqlglot/executor/", "sqlglot/planner.py", "sqlglot/generators/python.py")
+MAXN_REGION = ("sqlglot/parser.py", 2190, 2212)  # Parser.validate_expression: node counting and the limit error
 # Diagnostics (practice-board bisection): run no differential import (importers fallback) / verify nothing.
 NO_DIFF = os.environ.get("BR_NO_DIFF", "0") == "1"
 NO_VERIFY = os.environ.get("BR_NO_VERIFY", "0") == "1"
@@ -96,6 +102,16 @@ def _may_change_imports(text):
             if body.startswith(("import ", "from ")) or "import_module" in body or "__import__" in body:
                 return True
     return False
+
+
+def _smart_veto(test_id, ca):
+    """True if this giant must stay whatever the cheap evidence says."""
+    if test_id == PROBE_TEST:
+        return any(f.startswith(EXEC_SPECIFIC) for f in ca.files)
+    if test_id == MAXN_TEST:
+        f0, lo, hi = MAXN_REGION
+        return any(f == f0 and a <= hi and b >= lo for f, a, b in ca.fn_spans)
+    return True  # a giant we have no specific knowledge of
 
 
 def _affine(test_id, changed_paths):
@@ -256,6 +272,8 @@ def main():
 
         p_none = P_NONE_CODE if p.ca.py_changed else P_NONE_DATA
         giants = {n for n in X if dur[n] >= GIANT_MS}
+        if GIANT_MODE == "smart":
+            giants = {n for n in giants if not _smart_veto(id_of_num[n], p.ca)}
         p.cost_of = cost_of
         skip_ok_kind = not p.ca.kinds & {"fixture", "other", "py_syntax"}
         # A giant is never dropped blindly. test_execute_tpcds can be *probed*: run it on a few TPC-DS
@@ -412,6 +430,12 @@ def main():
             skip_giants = (DROP_GIANTS and giants and not keep and not bad and not anomaly and small_v >= MIN_CHEAP_EVIDENCE
                            and not p.ca.kinds & {"fixture", "other", "py_syntax"}
                            and not any(_affine(id_of_num[n], changed) for n in giants))
+            if skip_giants and GIANT_MODE == "smart":
+                veto = {n for n in giants if _smart_veto(id_of_num[n], p.ca)}
+                if veto:
+                    p.ca.notes.append(f"giants kept (smart veto): {sorted(veto)}")
+                giants -= veto
+                skip_giants = bool(giants)
             if skip_giants:
                 unverified -= giants
                 optional |= giants
