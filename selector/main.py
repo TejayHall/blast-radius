@@ -34,6 +34,8 @@ HEAVY_PRELOAD = 0.70     # s CPU once: duckdb/pandas/numpy in the zygote
 GIANT_MS = 9000          # tests this long are never verified; they may be dropped on strong evidence
 CHEAP_MS = 900
 MIN_CHEAP_EVIDENCE = 5
+# Dropping unverified giant tests on cheap evidence is a calculated risk; off unless enabled.
+DROP_GIANTS = os.environ.get("BR_DROP_GIANTS", "0") == "1"
 P_NONE_CODE = 0.5        # prior: no candidate fails (sample: 8 of 15 code commits with candidates)
 P_NONE_DATA = 0.05
 
@@ -110,6 +112,15 @@ def main():
         f, cls, _ = ix.ids[i].split("::")
         return max(0.002, ix.e[i] - setup.get((f, cls), 0.0)), (f, cls)
 
+    cases_db = [None]
+
+    def get_cases():
+        if cases_db[0] is None:
+            from .cases import Cases
+
+            cases_db[0] = Cases()
+        return cases_db[0]
+
     cdir = os.path.join(DATA, "commits")
     names = sorted(f for f in os.listdir(cdir) if f.endswith(".patch"))
     plans = []
@@ -180,10 +191,32 @@ def main():
         if any(n not in num_to_idx for n in p.cand):
             continue
         blind = best_schedule(p.cand, dur)[0] / 1000.0
+        # fixture-driven tests: with a function-body-only change, only the cases reaching it can differ
+        p.filters = {}
+        p.cost_scale = {}
+        case_ok = (p.ca.fn_spans and not p.ca.import_time
+                   and p.ca.kinds <= {"py_fn", "py_noop"})
+        if case_ok:
+            cdb = get_cases()
+            for n in p.cand:
+                tid = id_of_num[n]
+                if not cdb.has(tid):
+                    continue
+                flt, nrel, ntot = cdb.relevant(tid, p.ca.fn_spans)
+                if flt is not None and ntot:
+                    p.filters[tid] = flt
+                    p.cost_scale[n] = (nrel + 0.5) / ntot
+
+        def cost_of(n):
+            c, key = inc(n)
+            sc = p.cost_scale.get(n)
+            return (c * sc + 0.01 if sc is not None else c), key
+
         V, X = set(), set()
         for n in p.cand:
-            c, _ = inc(n)
-            if dur[n] >= GIANT_MS or c > max(1.0, 1.25 * dur[n] / 1000.0) or id_of_num[n] in SUBPROCESS_TESTS:
+            c, _ = cost_of(n)
+            if (id_of_num[n] in SUBPROCESS_TESTS or c > max(1.0, 1.25 * dur[n] / 1000.0)
+                    or (dur[n] >= GIANT_MS and c > 3.0)):
                 X.add(n)
             else:
                 V.add(n)
@@ -195,7 +228,7 @@ def main():
             seen = set()
             hv = False
             for n in S:
-                c, key = inc(n)
+                c, key = cost_of(n)
                 e += c
                 if key not in seen:
                     seen.add(key)
@@ -206,13 +239,14 @@ def main():
 
         p_none = P_NONE_CODE if p.ca.py_changed else P_NONE_DATA
         giants = {n for n in X if dur[n] >= GIANT_MS}
-        skip_ok_kind = not p.ca.kinds & {"fixture", "other", "py_syntax"}
+        p.cost_of = cost_of
+        skip_ok_kind = DROP_GIANTS and not p.ca.kinds & {"fixture", "other", "py_syntax"}
         # FULL: verify all of V.  LITE: verify only tests whose local cost is well below their recorded
         # cost (plus enough cheap tests to carry evidence); include the rest of V unverified.
-        lite = {n for n in V if inc(n)[0] <= 0.6 * dur[n] / 1000.0 + 0.003}
+        lite = {n for n in V if cost_of(n)[0] <= 0.6 * dur[n] / 1000.0 + 0.003}
         cheap_lite = [n for n in lite if dur[n] < CHEAP_MS]
         if len(cheap_lite) < MIN_CHEAP_EVIDENCE:
-            extra = sorted((n for n in V - lite if dur[n] < CHEAP_MS), key=lambda n: inc(n)[0])
+            extra = sorted((n for n in V - lite if dur[n] < CHEAP_MS), key=lambda n: cost_of(n)[0])
             lite |= set(extra[: MIN_CHEAP_EVIDENCE * 2 - len(cheap_lite)])
         options = []
         for label, S in (("full", V), ("lite", lite)):
@@ -256,23 +290,36 @@ def main():
         deadline = t0 + wall_budget
         jobs = []
         for p in chosen:
-            # cheapest classes first, cheapest tests first within a class (setUpClass runs once)
-            by_cls = {}
-            for n in p.V:
-                c, key = inc(n)
-                by_cls.setdefault(key, []).append((c, n))
-            keys_sorted = sorted(by_cls, key=lambda k: setup.get(k, 0.0) + min(x[0] for x in by_cls[k]))
-            ids = []
-            for k in keys_sorted:
-                ids.extend(id_of_num[n] for _, n in sorted(by_cls[k]))
+            # pytest collection order (tests.json order): the labels were produced in this order, and a
+            # few tests leave global state behind, so keep the relative order identical
+            ids = [id_of_num[n] for n in sorted(p.V)]
             per = {}
             always = []
             for n in p.V:
-                c, _ = inc(n)
+                c, _ = p.cost_of(n)
                 per[id_of_num[n]] = max(2.0, 5.0 * c + 1.0)
                 if c < 0.5 * dur[n] / 1000.0 and dur[n] >= 300:
                     always.append(id_of_num[n])
-            jobs.append((p, ids, per, {"always": always, "stop_after_fail": True}))
+            # merge case filters per fixture; only when every reader of that fixture in this job is filtered
+            vids = {id_of_num[n] for n in p.V}
+            merged = {}
+            blocked = set()
+            for tid in vids:
+                for fx, keep in p.filters.get(tid, {}).items():
+                    merged.setdefault(fx, set()).update(keep)
+            for fx in list(merged):
+                for ri in ix.readers("tests/fixtures/" + fx):
+                    rn = idx_to_num[ri]
+                    rt = id_of_num.get(rn) if rn is not None else None
+                    if rt in vids and fx not in p.filters.get(rt, {}):
+                        blocked.add(fx)
+                for tid in vids:
+                    if tid not in p.filters and fx in get_cases().fixtures(tid):
+                        blocked.add(fx)
+            case_filters = {fx: sorted(v) for fx, v in merged.items() if fx not in blocked}
+            if case_filters:
+                p.ca.notes.append(f"case filters: " + ", ".join(f"{fx}:{len(v)}" for fx, v in case_filters.items()))
+            jobs.append((p, ids, per, {"always": always, "stop_after_fail": True, "case_filters": case_filters}))
         stats = engine.run_many(ROOT, jobs, deadline, parallel=2, log=log)
         for job, (cpu, wall) in zip(jobs, stats):
             job[0].vcpu = cpu
@@ -300,7 +347,7 @@ def main():
             anomaly = p.vcpu is not None and p.vcpu > 3.0 * p.est + 0.5
             small_v = sum(1 for n in p.V if dur[n] < CHEAP_MS)
             changed = list(p.ca.py_changed)
-            skip_giants = (giants and not keep and not bad and not anomaly and small_v >= MIN_CHEAP_EVIDENCE
+            skip_giants = (DROP_GIANTS and giants and not keep and not bad and not anomaly and small_v >= MIN_CHEAP_EVIDENCE
                            and not p.ca.kinds & {"fixture", "other", "py_syntax"}
                            and not any(_affine(id_of_num[n], changed) for n in giants))
             if skip_giants:

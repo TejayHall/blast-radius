@@ -22,6 +22,7 @@ COPY data /app/data
 RUN cd /app \
  && python -c "from selector.index import build_cache; build_cache()" \
  && python -c "from selector.importtime import build_keys_cache; build_keys_cache()" \
+ && python -c "from selector.cases import build_cache; build_cache()" \
  && python tools/build_state.py /sqlglot \
  && python -m compileall -q /app/selector \
  && chmod -R a+rX /app /sqlglot

@@ -45,6 +45,7 @@ class CommitAnalysis:
         self.py_changed = set()  # python files with semantic changes
         self.import_time = False  # any change executes at import time
         self.needs_diff = False   # differential import would sharpen the candidate set
+        self.fn_spans = []        # (path, a, b) of changed function-body statements (old coordinates)
         self.diff_fallback = set()  # sound candidates to add if no differential import is run
 
 
@@ -246,6 +247,7 @@ class Analyzer:
                 else:
                     ca.cand |= c
                     ca.notes.append(f"{path}:{a}-{b} {kind} fn {loc.qual} span={span} -> {len(c)}")
+                ca.fn_spans.append((path, span[0], span[1]))
                 continue
             # import-time code (module / class body, def headers)
             ca.import_time = True

@@ -246,7 +246,17 @@ def _run_tests(test_ids, per_test_timeout, budget_deadline):
             continue
         modname = f[:-3].replace("/", ".")
         try:
+            if _STATE.get("case_filters"):
+                from . import caseflt
+
+                if caseflt.MODE[0] != "filter":
+                    caseflt.install()
+                    caseflt.FILTER.clear()
+                    caseflt.FILTER.update({fx: set(v) for fx, v in _STATE["case_filters"].items()})
+                    caseflt.MODE[0] = "filter"
             mod = importlib.import_module(modname)
+            if _STATE.get("case_filters"):
+                caseflt.patch_modules()
             if hasattr(mod, "ProcessPoolExecutor"):
                 mod.ProcessPoolExecutor = _InlineExecutor
             klass = getattr(mod, cls)
@@ -361,6 +371,7 @@ def _child_main(root, files, test_ids, per_test_timeout, budget, tmpdir, w, opts
             _ALWAYS.clear()
             _ALWAYS.update(opts.get("always", ()))
             _STATE["stop_after_fail"] = bool(opts.get("stop_after_fail"))
+            _STATE["case_filters"] = opts.get("case_filters") or {}
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, 1)
         os.dup2(devnull, 2)
