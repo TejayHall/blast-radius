@@ -78,6 +78,17 @@ def path_to_module(rel):
     return m
 
 
+_BASE = [None]
+
+
+def _load_base():
+    # loaded once in the parent: forked children share it copy-on-write
+    if _BASE[0] is None:
+        with open(STATE_PATH, "rb") as fh:
+            _BASE[0] = marshal.load(fh)
+    return _BASE[0]
+
+
 def _child(root, files, w, tmpdir):
     try:
         import gc
@@ -90,8 +101,7 @@ def _child(root, files, w, tmpdir):
 
         from .engine import _install_overlay
 
-        with open(STATE_PATH, "rb") as fh:
-            base = marshal.load(fh)
+        base = _load_base()
         os.makedirs(tmpdir, exist_ok=True)
         _install_overlay(root, files, os.path.join(tmpdir, "d%d" % os.getpid()))
         _prepare(root)
@@ -158,6 +168,11 @@ def _child(root, files, w, tmpdir):
 
 def run_diffs(root, file_sets, parallel=2, timeout=25.0, tmpdir="/tmp/brdiff", deadline=None):
     """Run several differential imports, `parallel` at a time. Returns [(result_or_None, cpu)]."""
+    _load_base()
+    import unittest  # noqa: F401  (children import these anyway: do it once before forking)
+    import unittest.mock  # noqa: F401
+
+    from . import engine  # noqa: F401
     results = [(None, 0.0)] * len(file_sets)
     pending = list(range(len(file_sets)))
     running = {}

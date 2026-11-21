@@ -63,6 +63,14 @@ class Keys:
     def inst_tests(self, qual):
         return self.tests(self.inst.get(qual))
 
+    def inst_by_key(self, key):
+        """Tests that instantiated any expression class whose key (lower-cased class name) is `key`."""
+        out = set()
+        for q, sid in self.inst.items():
+            if q.rsplit(".", 1)[-1].lower() == key:
+                out |= self.tests(sid)
+        return out
+
     def any_access(self, tag):
         d = self.acc.get(tag)
         out = set()
@@ -160,6 +168,17 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(
                 notes.append(f"diff: function {full} -> callers {len(c)}")
                 C |= c
                 continue
+            if node is None and kind == "C":
+                # a method the pinned tree does not have: it overrides an inherited one (whose callers now
+                # reach it) or, for generators, `<key>_sql` is picked up by the dispatch table for that
+                # expression class
+                imp = ix.file_any(path)
+                c = analyzer.same_name_callers(attr) & imp
+                if attr.endswith("_sql"):
+                    c |= keys.inst_by_key(attr[:-4]) & imp
+                notes.append(f"diff: new method {full} -> same-name callers / instances {len(c)}")
+                C |= c
+                # and anything naming it, below
         # scalar / other object: readers by name at run time, restricted to tests that loaded the module
         users = analyzer.runtime_name_users(attr)
         imp = ix.file_any(path)

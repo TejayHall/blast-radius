@@ -452,6 +452,8 @@ def run_many(root, jobs, deadline, parallel=2, log=None, tmpdir="/tmp/brov", bud
     """jobs: list of (plan, test_ids, per_test_timeout). plan.ca.files (or plan.files) is the overlay.
     Sets plan.verified = {test_id: status}. Returns list of (cpu, wall) per job."""
     import select
+    import unittest  # noqa: F401  (every child needs these: import once before forking)
+    import unittest.mock  # noqa: F401
     pending = list(range(len(jobs)))
     running = {}  # fd -> (job_index, pid, t_start, chunks, job_deadline)
     stats = [(0.0, 0.0)] * len(jobs)

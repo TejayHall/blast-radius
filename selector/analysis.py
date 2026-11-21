@@ -183,6 +183,12 @@ class Analyzer:
         if (fd.is_new or fd.is_deleted or fd.rename or fd.binary
                 or not (path.startswith(("sqlglot/", "tests/")))):
             ca.verifiable = False
+        if _touches_pytest_config(self.root, fd):
+            # test-runner configuration (conftest, pytest options) can change every test's outcome
+            ca.kinds.add("fallback")
+            ca.cand |= ix.all_tests()
+            ca.notes.append(f"{path}: pytest configuration changed -> all tests")
+            return
         if fd.binary:
             ca.verifiable = False
             ca.kinds.add("other")
@@ -424,6 +430,22 @@ class Analyzer:
             return False
         return ast.dump(so, include_attributes=False) == ast.dump(sn, include_attributes=False)
 
+    def same_name_callers(self, name):
+        """Run-time callers of every function or method called `name` in the pinned tree."""
+        users = set()
+        files = {f for f, _ in self.name_lines(name)}
+        for f in files:
+            if not f.endswith(".py"):
+                continue
+            try:
+                tree = self._tree(f)
+            except (SyntaxError, OSError, ValueError):
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name and node.body:
+                    users |= self.ix.fnr_tests(f, node.body[0].lineno, node.end_lineno)
+        return users
+
     def runtime_name_users(self, name):
         users = set()
         for (f, ln) in self.name_lines(name):
@@ -495,6 +517,34 @@ def _bound_names(stmt):
             elif isinstance(node, ast.Attribute):
                 names.append(node.attr)
     return names
+
+
+_PYTEST_FILES = ("conftest.py", "pytest.ini", "tox.ini", ".pytest.ini")
+
+
+def _touches_pytest_config(root, fd):
+    paths = {p for p in (fd.path, fd.old_path) if p and p != "/dev/null"}
+    for p in paths:
+        base = p.rsplit("/", 1)[-1]
+        if base in _PYTEST_FILES:
+            return True
+        if p in ("pyproject.toml", "setup.cfg"):
+            try:
+                old = _read(root, p).split("\n")
+            except OSError:
+                old = []
+            for h in fd.hunks:
+                body = "\n".join(h[4])
+                if "pytest" in body:
+                    return True
+                # section header governing the hunk
+                for ln in range(min(h[0], len(old)) - 1, -1, -1):
+                    s = old[ln].strip()
+                    if s.startswith("[") and s.endswith("]"):
+                        if "pytest" in s:
+                            return True
+                        break
+    return False
 
 
 def _filter_comments(s):

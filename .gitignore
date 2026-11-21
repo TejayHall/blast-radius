@@ -3,3 +3,4 @@ __pycache__/
 data/*.marshal
 output.jsonl
 stderr.log
+data/cases_blobs.bin
