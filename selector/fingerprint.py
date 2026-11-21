@@ -203,7 +203,12 @@ def attr_entry(fpr, v):
     """('d', {keyfp: digest}) for dicts, ('s', set(keyfp)) for sets, ('v', digest, typename[, noncode])."""
     t = type(v)
     if t is dict:
-        return ("d", {key_fp(k): fpr.v(x) for k, x in v.items()})
+        ks = [key_fp(k) for k in v]
+        entries = {kf: fpr.v(x) for kf, x in zip(ks, v.values())}
+        if not fpr.ordered:  # noisy tag: its order is not reproducible
+            return ("d", entries)
+        # third field: digest of the key order (some tables are iterated in order at run time)
+        return ("d", entries, _d("O", *ks))
     if t is set or t is frozenset:
         return ("s", {key_fp(x) for x in v})
     f = v
@@ -379,6 +384,8 @@ def diff(old, new):
             for k in set(da) | set(db):
                 if da.get(k) != db.get(k):
                     out.append((tag, k, "dict"))
+            if set(da) == set(db) and len(a) > 2 and len(b) > 2 and a[2] != b[2]:
+                out.append((tag, "*", "dict"))  # same entries, new order: whoever iterates it
         else:
             sa, sb = a[1], b[1]
             if len(sa) != len(sb):
