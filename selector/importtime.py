@@ -113,6 +113,24 @@ _ENUM_MEMBER_ATTRS = ("_member_map_", "_member_names_", "_value2member_map_", "_
                       "_unhashable_values_")
 
 
+def _class_users(analyzer, ix, keys, path, qual, res):
+    """Tests that can hold instances of class `qual` (dotted, module included): run-time code naming it or a
+    subclass, plus recorded instantiations for expression classes; importers if nothing names it."""
+    imp = ix.file_any(path)
+    if not qual:
+        return imp
+    names = {qual.rsplit(".", 1)[-1]}
+    subs = res.get("subclasses", {}).get(qual) or []
+    names |= {q.rsplit(".", 1)[-1] for q in subs}
+    c = set()
+    for nm in names:
+        c |= analyzer.runtime_name_users(nm)
+    for q in [qual, *subs]:
+        c |= keys.inst_tests(q)
+    c &= imp
+    return c if c else imp
+
+
 def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(), changed_idents=None):
     C = set()
     patched_modules = set(patched_modules)
@@ -128,11 +146,26 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(
         notes.append(f"diff: {m} fails to import -> {len(c)} importers")
         C |= c
     for mod, tag, key, typ in res.get("changes", []):
+        path = module_to_path(root, mod)
         if typ == "function_code":
+            # a body edit: line coverage of the edited statements already selected its callers - provided the
+            # function has a definition in the source. Generated ones (dataclass __init__/__eq__, exec-built)
+            # change with class-level edits that no line coverage sees: every importer of the module.
             if not V1_MAPPING:
+                kind_, rest_ = tag.split(":", 1)
+                qual_, attr_ = rest_.rsplit(":", 1)
+                cq = qual_[len(mod) + 1:] if (kind_ == "C" and qual_.startswith(mod + ".")) else ""
+                try:
+                    found = _find_def(analyzer._tree(path), f"{cq}.{attr_}" if cq else attr_) is not None
+                except (SyntaxError, OSError, ValueError):
+                    found = False
+                if found:
+                    continue
+                c = _class_users(analyzer, ix, keys, path, qual_ if kind_ == "C" else "", res)
+                notes.append(f"diff: generated function {tag} changed -> class users {len(c)}")
+                C |= c
                 continue
             typ = "function"
-        path = module_to_path(root, mod)
         if typ == "ref":
             # a global that refers to an object defined elsewhere (an import) was added, removed or
             # re-pointed. Only meaningful in a module the patch edits (elsewhere it is lazy-attribute
@@ -193,13 +226,18 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(
             if node is None and kind == "C":
                 # a method the pinned tree does not have: it overrides an inherited one (whose callers now
                 # reach it) or, for generators, `<key>_sql` is picked up by the dispatch table for that
-                # expression class
+                # expression class. Dunders (often generated, e.g. by @dataclass) reach the class's users.
                 imp = ix.file_any(path)
-                c = analyzer.same_name_callers(attr) & imp
+                if attr.startswith("__") and attr.endswith("__"):
+                    c = _class_users(analyzer, ix, keys, path, qual, res)
+                else:
+                    c = analyzer.same_name_callers(attr) & imp
                 if attr.endswith("_sql"):
                     c |= keys.inst_by_key(attr[:-4]) & imp
                 notes.append(f"diff: new method {full} -> same-name callers / instances {len(c)}")
                 C |= c
+                if attr.startswith("__") and attr.endswith("__"):
+                    continue  # protocol methods are not called by name: the class's users cover them
                 # and anything naming it, below
         # scalar / other object: readers by name at run time, restricted to tests that loaded the module
         users = analyzer.runtime_name_users(attr)
