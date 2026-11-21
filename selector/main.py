@@ -104,10 +104,21 @@ def _may_change_imports(text):
     return False
 
 
-def _smart_veto(test_id, ca):
-    """True if this giant must stay whatever the cheap evidence says."""
+MIN_EXEC_EVIDENCE = 5
+
+
+def _exec_specific(ca):
+    return any(f.startswith(EXEC_SPECIFIC) for f in ca.files)
+
+
+def _smart_veto(test_id, ca, exec_pass=None):
+    """True if this giant must stay whatever the cheap evidence says. For test_execute_tpcds and a change in
+    the executor's own code the evidence must come from the executor's tests: `exec_pass` cheap
+    tests/test_executor.py tests verified passing (None while planning: not yet known)."""
     if test_id == PROBE_TEST:
-        return any(f.startswith(EXEC_SPECIFIC) for f in ca.files)
+        if not _exec_specific(ca):
+            return False
+        return exec_pass is not None and exec_pass < MIN_EXEC_EVIDENCE
     if test_id == MAXN_TEST:
         f0, lo, hi = MAXN_REGION
         return any(f == f0 and a <= hi and b >= lo for f, a, b in ca.fn_spans)
@@ -305,8 +316,10 @@ def main():
             extra = sorted((n for n in V - lite if dur[n] < CHEAP_MS), key=lambda n: cost_of(n)[0])
             lite |= set(extra[: MIN_CHEAP_EVIDENCE * 2 - len(cheap_lite)])
         options = []
+        # an executor change can only release test_execute_tpcds on the executor tests' own evidence: verify all
+        only_full = GIANT_MODE == "smart" and _exec_specific(p.ca) and any(id_of_num[n] == PROBE_TEST for n in giants)
         for label, S in (("full", V), ("lite", lite)):
-            if not S or (label == "lite" and S == V):
+            if not S or (label == "lite" and (S == V or only_full)):
                 continue
             est, heavy = est_of(S)
             B = V - S
@@ -324,6 +337,8 @@ def main():
             expected = est + p_none * cost_none + (1 - p_none) * cost_fail
             gain = blind - expected - (HEAVY_PRELOAD if heavy and not heavy_needed else 0.0)
             options.append((gain, label, S, est, heavy, cost_none, cost_fail))
+        if os.environ.get("BR_VERBOSE"):
+            p.ca.notes.append("options: " + ", ".join(f"{o[1]} gain {o[0]:.2f} est {o[3]:.2f} none {o[5]:.2f}" for o in options))
         gain, label, S, est, heavy, cost_none, cost_fail = max(options, key=lambda o: o[0])
         p.V, p.X, p.est, p.gain = S, X, est, gain
         p.ca.notes.append(f"plan[{label}]: blind {blind:.2f} est {est:.2f} |S|={len(S)} |V|={len(V)} |X|={len(X)} "
@@ -431,7 +446,9 @@ def main():
                            and not p.ca.kinds & {"fixture", "other", "py_syntax"}
                            and not any(_affine(id_of_num[n], changed) for n in giants))
             if skip_giants and GIANT_MODE == "smart":
-                veto = {n for n in giants if _smart_veto(id_of_num[n], p.ca)}
+                exec_pass = sum(1 for n in p.V if dur[n] < CHEAP_MS and id_of_num[n].startswith(EXECUTOR_PREFIX)
+                                and p.verified.get(id_of_num[n]) == "pass")
+                veto = {n for n in giants if _smart_veto(id_of_num[n], p.ca, exec_pass)}
                 if veto:
                     p.ca.notes.append(f"giants kept (smart veto): {sorted(veto)}")
                 giants -= veto
