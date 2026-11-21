@@ -127,8 +127,25 @@ def apply_filediff(old_text, fd):
     out = []
     pos = 0  # 0-based index into old_lines
     no_newline_new = False
-    for (os_, ol, ns, nl, body) in fd.hunks:
-        start = os_ - 1 if ol > 0 else os_  # for ol == 0, os_ is line after which to insert
+    shift = 0  # like git apply: a hunk whose context sits at an offset is relocated (no fuzz)
+    for h in fd.hunks:
+        os_, ol, ns, nl, body = h
+        start = (os_ - 1 if ol > 0 else os_) + shift
+        old_side = [l[1:] for l in body if l[:1] in (" ", "-")]
+        if old_side and old_lines[start:start + len(old_side)] != old_side:
+            best = None
+            for cand in range(pos, len(old_lines) - len(old_side) + 1):
+                if old_lines[cand:cand + len(old_side)] == old_side:
+                    if best is None or abs(cand - start) < abs(best - start):
+                        best = cand
+                    if cand > start and best is not None:
+                        break
+            if best is None:
+                raise ValueError(f"hunk at old line {os_} does not match")
+            shift += best - start
+            start = best
+            # record the real position so changed-region computations stay in old-file coordinates
+            h[0] = start + 1 if ol > 0 else start
         if start < pos:
             raise ValueError("overlapping hunks")
         out.extend(old_lines[pos:start])

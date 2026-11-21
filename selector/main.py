@@ -34,8 +34,21 @@ HEAVY_PRELOAD = 0.70     # s CPU once: duckdb/pandas/numpy in the zygote
 GIANT_MS = 9000          # tests this long are never verified; they may be dropped on strong evidence
 CHEAP_MS = 900
 MIN_CHEAP_EVIDENCE = 5
-# Dropping unverified giant tests on cheap evidence is a calculated risk; off unless enabled.
-DROP_GIANTS = os.environ.get("BR_DROP_GIANTS", "0") == "1"
+PROBE_TEST = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+PROBE_FIXTURE = "optimizer/tpc-ds/tpc-ds.sql"
+PROBE_FIXTURE_READER = "tests/test_optimizer.py::TestOptimizer::test_tpcds"
+PROBE_K = 4
+PROBE_DEFAULT = (2, 27, 52, 77)
+EXECUTOR_PREFIX = "tests/test_executor.py::TestExecutor::"
+# TPC fixtures are loaded by TestExecutor.setUpClass for every test of the class; only these use them
+CLASS_LOADED_FIXTURES = {
+    "optimizer/tpc-h/tpc-h.sql": {EXECUTOR_PREFIX + "test_execute_tpch", EXECUTOR_PREFIX + "test_optimized_tpch"},
+    "optimizer/tpc-ds/tpc-ds.sql": {EXECUTOR_PREFIX + "test_execute_tpcds"},
+}
+# Giant tests (>= 9 s): "drop" = release on clean cheap evidence, "probe" = also require a passing probe of
+# test_execute_tpcds on a few queries, "keep" = always include.
+GIANT_MODE = os.environ.get("BR_GIANT_MODE", "drop")
+DROP_GIANTS = GIANT_MODE == "drop"
 P_NONE_CODE = 0.5        # prior: no candidate fails (sample: 8 of 15 code commits with candidates)
 P_NONE_DATA = 0.05
 
@@ -240,7 +253,28 @@ def main():
         p_none = P_NONE_CODE if p.ca.py_changed else P_NONE_DATA
         giants = {n for n in X if dur[n] >= GIANT_MS}
         p.cost_of = cost_of
-        skip_ok_kind = DROP_GIANTS and not p.ca.kinds & {"fixture", "other", "py_syntax"}
+        skip_ok_kind = not p.ca.kinds & {"fixture", "other", "py_syntax"}
+        # A giant is never dropped blindly. test_execute_tpcds can be *probed*: run it on a few TPC-DS
+        # queries that reach the change (or a fixed spread of queries); only a passing probe (plus clean
+        # cheap evidence) lets it go. Other giants (test_max_nodes) cannot be probed and always stay.
+        p.probe = None
+        probe_n = next((n for n in giants if id_of_num[n] == PROBE_TEST), None)
+        if (GIANT_MODE == "probe" and probe_n is not None and skip_ok_kind
+                and PROBE_FIXTURE_READER not in {id_of_num[m] for m in V}):
+            idx = None
+            if probe_n in p.cost_scale and PROBE_TEST in p.filters:
+                rel = sorted(p.filters[PROBE_TEST].get(PROBE_FIXTURE, ()))
+                if rel:
+                    idx = [rel[int(i * (len(rel) - 1) / max(1, PROBE_K - 1))] for i in range(min(PROBE_K, len(rel)))]
+            if idx is None:
+                idx = list(PROBE_DEFAULT)
+            idx = sorted(set(idx))
+            p.probe = (probe_n, idx)
+            p.filters[PROBE_TEST] = {PROBE_FIXTURE: set(idx)}
+            p.cost_scale[probe_n] = (len(idx) + 0.5) / 99.0
+            V = V | {probe_n}
+            X = X - {probe_n}
+        giants = giants - ({p.probe[0]} if p.probe else set())
         # FULL: verify all of V.  LITE: verify only tests whose local cost is well below their recorded
         # cost (plus enough cheap tests to carry evidence); include the rest of V unverified.
         lite = {n for n in V if cost_of(n)[0] <= 0.6 * dur[n] / 1000.0 + 0.003}
@@ -254,9 +288,14 @@ def main():
                 continue
             est, heavy = est_of(S)
             B = V - S
+            if p.probe is not None and label == "lite":
+                S = S | {p.probe[0]}
+                B = V - S
             small = sum(1 for n in S if dur[n] < CHEAP_MS)
-            can_skip = bool(giants) and small >= MIN_CHEAP_EVIDENCE and skip_ok_kind
+            can_skip = bool(giants) and small >= MIN_CHEAP_EVIDENCE and skip_ok_kind and DROP_GIANTS
             keep_none = B | ((X - giants) if can_skip else X)
+            if p.probe is not None and small < MIN_CHEAP_EVIDENCE:
+                keep_none = keep_none | {p.probe[0]}
             cost_none = best_schedule(keep_none, dur)[0] / 1000.0
             some = min(S, key=lambda n: dur[n])
             cost_fail = best_schedule(X | B | {some}, dur)[0] / 1000.0
@@ -290,15 +329,22 @@ def main():
         deadline = t0 + wall_budget
         jobs = []
         for p in chosen:
-            # pytest collection order (tests.json order): the labels were produced in this order, and a
-            # few tests leave global state behind, so keep the relative order identical
-            ids = [id_of_num[n] for n in sorted(p.V)]
+            # cheapest classes first, cheapest tests first within a class (setUpClass runs once), so a
+            # failure (which ends the job early) is found for as little CPU as possible
+            by_cls = {}
+            for n in p.V:
+                c, key = p.cost_of(n)
+                by_cls.setdefault(key, []).append((c, n))
+            keys_sorted = sorted(by_cls, key=lambda k: setup.get(k, 0.0) + min(x[0] for x in by_cls[k]))
+            ids = []
+            for k in keys_sorted:
+                ids.extend(id_of_num[n] for _, n in sorted(by_cls[k]))
             per = {}
             always = []
             for n in p.V:
                 c, _ = p.cost_of(n)
                 per[id_of_num[n]] = max(2.0, 5.0 * c + 1.0)
-                if c < 0.5 * dur[n] / 1000.0 and dur[n] >= 300:
+                if c < 0.5 * dur[n] / 1000.0 and dur[n] >= 300 and not (p.probe and n == p.probe[0]):
                     always.append(id_of_num[n])
             # merge case filters per fixture; only when every reader of that fixture in this job is filtered
             vids = {id_of_num[n] for n in p.V}
@@ -308,9 +354,12 @@ def main():
                 for fx, keep in p.filters.get(tid, {}).items():
                     merged.setdefault(fx, set()).update(keep)
             for fx in list(merged):
+                users = CLASS_LOADED_FIXTURES.get(fx)
                 for ri in ix.readers("tests/fixtures/" + fx):
                     rn = idx_to_num[ri]
                     rt = id_of_num.get(rn) if rn is not None else None
+                    if users is not None and rt and rt.startswith(EXECUTOR_PREFIX) and rt not in users:
+                        continue  # opened by the class's setUpClass only; this test never uses the list
                     if rt in vids and fx not in p.filters.get(rt, {}):
                         blocked.add(fx)
                 for tid in vids:
@@ -342,6 +391,15 @@ def main():
                 keep.add(n)
                 if st != "fail":
                     bad = True  # timeout / unknown: evidence incomplete
+            if p.probe is not None:
+                pn = p.probe[0]
+                pst = p.verified.get(id_of_num[pn])
+                cheap_ok = sum(1 for n in p.V if n != pn and dur[n] < CHEAP_MS) >= MIN_CHEAP_EVIDENCE
+                anomaly0 = p.vcpu is not None and p.vcpu > 3.0 * p.est + 0.5
+                if (keep - {pn}) or pst != "pass" or not cheap_ok or bad or anomaly0:
+                    keep.add(pn)  # the giant stays unless its probe passed on clean evidence
+                else:
+                    p.ca.notes.append(f"giant {pn} released: probe on {len(p.probe[1])} queries passed")
             unverified = p.cand - p.V
             giants = {n for n in unverified if dur[n] >= GIANT_MS}
             anomaly = p.vcpu is not None and p.vcpu > 3.0 * p.est + 0.5

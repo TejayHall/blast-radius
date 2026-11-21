@@ -117,6 +117,7 @@ class Analyzer:
             ca.cand = self.ix.all_tests()
             ca.verifiable = False
             return ca
+        fds = self._merge_same_path(ca, fds)
         for fd in fds:
             try:
                 self._analyze_file(ca, fd)
@@ -125,6 +126,53 @@ class Analyzer:
                 ca.notes.append(f"{fd.path}: analysis error {e!r}")
                 ca.cand |= self.ix.all_tests()
         return ca
+
+    def _merge_same_path(self, ca, fds):
+        """Several diff sections for one file (e.g. a combined commit) apply in sequence. Replace them with a
+        single synthetic diff from the original file to the final text, so analysis and the overlay see
+        every change."""
+        by = {}
+        for fd in fds:
+            if fd.binary or fd.is_new or fd.is_deleted or fd.rename:
+                continue
+            by.setdefault(fd.path, []).append(fd)
+        dup = {p for p, lst in by.items() if len(lst) > 1}
+        if not dup:
+            return fds
+        import difflib
+
+        out, done = [], set()
+        for fd in fds:
+            if fd.path not in dup:
+                out.append(fd)
+                continue
+            if fd.path in done:
+                continue
+            done.add(fd.path)
+            try:
+                orig = _read(self.root, fd.path)
+            except OSError:
+                out.extend(by[fd.path])
+                continue
+            text = orig
+            try:
+                for part in by[fd.path]:
+                    text = apply_filediff(text, part)
+            except Exception:  # noqa: BLE001  sections relative to the original instead
+                text = None
+            if text is None:
+                ca.kinds.add("fallback")
+                ca.verifiable = False
+                ca.cand |= self.ix.all_tests()
+                ca.notes.append(f"{fd.path}: several diff sections that do not apply in sequence")
+                out.extend(by[fd.path])
+                continue
+            udiff = "\n".join(difflib.unified_diff(orig.split("\n"), text.split("\n"),
+                                                   f"a/{fd.path}", f"b/{fd.path}", lineterm="", n=3))
+            merged = parse_patch(f"diff --git a/{fd.path} b/{fd.path}\n" + udiff + "\n")
+            ca.notes.append(f"{fd.path}: merged {len(by[fd.path])} diff sections")
+            out.extend(merged)
+        return out
 
     def _analyze_file(self, ca, fd):
         ix = self.ix
