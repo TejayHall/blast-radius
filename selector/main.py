@@ -49,6 +49,9 @@ CLASS_LOADED_FIXTURES = {
 # test_execute_tpcds on a few queries, "keep" = always include.
 GIANT_MODE = os.environ.get("BR_GIANT_MODE", "keep")
 DROP_GIANTS = GIANT_MODE == "drop"
+# Diagnostics (practice-board bisection): run no differential import (importers fallback) / verify nothing.
+NO_DIFF = os.environ.get("BR_NO_DIFF", "0") == "1"
+NO_VERIFY = os.environ.get("BR_NO_VERIFY", "0") == "1"
 P_NONE_CODE = 0.5        # prior: no candidate fails (sample: 8 of 15 code commits with candidates)
 P_NONE_DATA = 0.05
 
@@ -172,7 +175,7 @@ def main():
         gain = (best_schedule(p.cand | fb, dur)[0] - best_schedule(p.cand, dur)[0]) / 1000.0
         # a much larger candidate set also kills later verification, even when blind cost is equal
         blowup = len(extra) >= 30 and len(extra) > 2 * len(p.cand)
-        if (gain > DIFF_COST * 1.2 or blowup) and ca.verifiable:
+        if (gain > DIFF_COST * 1.2 or blowup) and ca.verifiable and not NO_DIFF:
             want.append((p, fb))
         else:
             p.cand |= fb
@@ -307,7 +310,7 @@ def main():
         p.V, p.X, p.est, p.gain = S, X, est, gain
         p.ca.notes.append(f"plan[{label}]: blind {blind:.2f} est {est:.2f} |S|={len(S)} |V|={len(V)} |X|={len(X)} "
                           f"giants={len(giants)} cost_none {cost_none:.2f} cost_fail {cost_fail:.2f} gain {gain:.2f}")
-        if p.gain > 0.1:
+        if p.gain > 0.1 and not NO_VERIFY:
             to_verify.append(p)
             heavy_needed = heavy_needed or heavy
     to_verify.sort(key=lambda p: -p.gain / max(p.est, 0.05))
