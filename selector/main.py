@@ -58,7 +58,7 @@ MAXN_REGION = ("sqlglot/parser.py", 2190, 2212)  # Parser.validate_expression: n
 # Diagnostics (practice-board bisection): run no differential import (importers fallback) / verify nothing.
 NO_DIFF = os.environ.get("BR_NO_DIFF", "0") == "1"
 NO_VERIFY = os.environ.get("BR_NO_VERIFY", "1") == "1"
-NO_BLOWUP = os.environ.get("BR_NO_BLOWUP", "1") == "1"   # v1 trigger: diff only when it saves enough
+NO_BLOWUP = os.environ.get("BR_NO_BLOWUP", "0") == "1"   # v1 trigger: diff only when it saves enough
 P_NONE_CODE = 0.5        # prior: no candidate fails (sample: 8 of 15 code commits with candidates)
 P_NONE_DATA = 0.05
 
