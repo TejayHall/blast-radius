@@ -110,7 +110,7 @@ def _find_def(tree, qual):
     return node
 
 
-V1_MAPPING = os.environ.get("BR_V1_MAPPING", "0") == "1"  # diagnostics: v1's broader mapping
+V1_MAPPING = os.environ.get("BR_V1_MAPPING", "1") == "1"  # diagnostics: v1's broader mapping
 
 
 _ENUM_MEMBER_ATTRS = ("_member_map_", "_member_names_", "_value2member_map_", "_hashable_values_",
