@@ -111,7 +111,7 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes):
         notes.append(f"diff: {m} fails to import -> {len(c)} importers")
         C |= c
     for mod, tag, key, typ in res.get("changes", []):
-        if typ == "ref":
+        if typ in ("ref", "function_code"):
             continue
         path = module_to_path(root, mod)
         if tag.startswith("K:"):
@@ -159,7 +159,10 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes):
             for q in subs:
                 near |= keys.inst_tests(q)
             near |= analyzer.runtime_name_users(qual.rsplit(".", 1)[-1])
-            for reg in ("ALL_FUNCTIONS", "EXPR_CLASSES", "FUNCTION_BY_NAME", "subclasses", "__subclasses__"):
+            # generic walks over every class: iterating the registries at run time
+            for reg in ("M:sqlglot.expressions:FUNCTION_BY_NAME", "M:sqlglot.expressions:EXPR_CLASSES"):
+                near |= keys.accessors(reg, ["*"])
+            for reg in ("ALL_FUNCTIONS", "__subclasses__"):
                 near |= analyzer.runtime_name_users(reg)
             c2 = c & near
             notes.append(f"diff: {tag} ({typ}) -> name users {len(users)} & importers {len(imp)} = {len(c)}; "

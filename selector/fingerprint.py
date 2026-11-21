@@ -21,14 +21,14 @@ _B2 = hashlib.blake2b
 
 
 def _d(*parts):
-    m = _B2(digest_size=8)
-    for p in parts:
-        if isinstance(p, bytes):
-            m.update(p)
-        else:
-            m.update(str(p).encode("utf-8", "surrogatepass"))
-        m.update(b"\x1f")
-    return m.digest()
+    return _B2(b"".join(p if isinstance(p, bytes) else str(p).encode("utf-8", "surrogatepass") for p in parts),
+               digest_size=8).digest()
+
+
+def _lit(t, v):
+    # literals are encoded directly (no hashing): cheap and unambiguous
+    r = repr(v).encode("utf-8", "surrogatepass")
+    return b"L" + t.__name__.encode() + b":" + r if len(r) < 48 else _d("L", t.__name__, r)
 
 
 class Fingerprinter:
@@ -56,7 +56,7 @@ class Fingerprinter:
     def v(self, v, depth=0):
         t = type(v)
         if t in _LIT:
-            return _d("L", t.__name__, repr(v))
+            return _lit(t, v)
         key = id(v)
         r = self.memo.get(key)
         if r is not None:
@@ -150,13 +150,32 @@ def key_fp(k):
     return f"?:{type(k).__qualname__}"
 
 
+def _noncode(fpr, f):
+    """Digest of a function object without its code: defaults, kw-defaults and closure cells."""
+    clo = b""
+    if f.__closure__:
+        parts = []
+        for c in f.__closure__:
+            try:
+                parts.append(fpr.v(c.cell_contents))
+            except ValueError:
+                parts.append(b"<empty>")
+        clo = b"".join(parts)
+    return _d("FN", f.__module__, f.__qualname__, fpr.v(f.__defaults__), fpr.v(f.__kwdefaults__), clo)
+
+
 def attr_entry(fpr, v):
-    """('d', {keyfp: digest}) for dicts, ('s', set(keyfp)) for sets, ('v', digest, typename) otherwise."""
+    """('d', {keyfp: digest}) for dicts, ('s', set(keyfp)) for sets, ('v', digest, typename[, noncode])."""
     t = type(v)
     if t is dict:
         return ("d", {key_fp(k): fpr.v(x) for k, x in v.items()})
     if t is set or t is frozenset:
         return ("s", {key_fp(x) for x in v})
+    f = v
+    if t in (staticmethod, classmethod):
+        f = v.__func__
+    if type(f) is types.FunctionType:
+        return ("v", fpr.v(v), t.__name__, _noncode(fpr, f))
     return ("v", fpr.v(v), t.__name__)
 
 
@@ -307,6 +326,9 @@ def diff(old, new):
             continue
         if a is None or b is None or a[0] != b[0] or a[0] == "v":
             tn = (a or b)[2] if (a or b)[0] == "v" else (a or b)[0]
+            if (a is not None and b is not None and a[0] == "v" and len(a) > 3 and len(b) > 3
+                    and a[3] == b[3]):
+                tn = "function_code"  # only the code differs: a body edit, already covered by line coverage
             out.append((tag, "*", tn))
             continue
         if a[0] == "d":

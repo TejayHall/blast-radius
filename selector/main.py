@@ -117,7 +117,9 @@ def main():
         if not extra:
             continue
         gain = (best_schedule(p.cand | fb, dur)[0] - best_schedule(p.cand, dur)[0]) / 1000.0
-        if gain > DIFF_COST * 1.2 and ca.verifiable:
+        # a much larger candidate set also kills later verification, even when blind cost is equal
+        blowup = len(extra) >= 30 and len(extra) > 2 * len(p.cand)
+        if (gain > DIFF_COST * 1.2 or blowup) and ca.verifiable:
             want.append((p, fb))
         else:
             p.cand |= fb
