@@ -218,13 +218,18 @@ def main():
                 p.cand |= fb
                 p.ca.notes.append(f"diff failed (cpu {cpu:.2f}s): fallback {len(fb)}")
                 continue
-            patched = [m for m in (diffimport.path_to_module(fp) for fp in p.ca.files) if m]
-            idents = {}
-            for fp, ids in p.ca.changed_idents.items():
-                m = diffimport.path_to_module(fp)
-                if m:
-                    idents.setdefault(m, set()).update(ids)
-            c = importtime.candidates_from_diff(r, ix, keys, an, ROOT, p.ca.notes, patched, idents)
+            try:
+                patched = [m for m in (diffimport.path_to_module(fp) for fp in p.ca.files) if m]
+                idents = {}
+                for fp, ids in p.ca.changed_idents.items():
+                    m = diffimport.path_to_module(fp)
+                    if m:
+                        idents.setdefault(m, set()).update(ids)
+                c = importtime.candidates_from_diff(r, ix, keys, an, ROOT, p.ca.notes, patched, idents)
+            except Exception as e:  # noqa: BLE001  never lose a commit to a mapping bug: fall back
+                p.cand |= fb
+                p.ca.notes.append(f"diff mapping error {e!r}: fallback {len(fb)}")
+                continue
             cn = {idx_to_num[i] for i in c if idx_to_num[i] is not None}
             p.cand |= cn
             p.ca.notes.append(f"diff cpu {cpu:.2f}s: {len(r.get('changes', []))} changes, "
@@ -236,123 +241,127 @@ def main():
     to_verify = []
     heavy_needed = False
     for p in plans:
-        if not p.cand or not p.ca.verifiable or "fallback" in p.ca.kinds:
-            continue
-        if any(n not in num_to_idx for n in p.cand):
-            continue
-        blind = best_schedule(p.cand, dur)[0] / 1000.0
-        # fixture-driven tests: with a function-body-only change, only the cases reaching it can differ
-        p.filters = {}
-        p.cost_scale = {}
-        case_ok = (p.ca.fn_spans and not p.ca.import_time
-                   and p.ca.kinds <= {"py_fn", "py_noop"})
-        if case_ok:
-            cdb = get_cases()
-            for n in p.cand:
-                tid = id_of_num[n]
-                if not cdb.has(tid):
-                    continue
-                flt, nrel, ntot = cdb.relevant(tid, p.ca.fn_spans)
-                if flt is not None and ntot:
-                    p.filters[tid] = flt
-                    p.cost_scale[n] = (nrel + 0.5) / ntot
-
-        def cost_of(n):
-            c, key = inc(n)
-            sc = p.cost_scale.get(n)
-            return (c * sc + 0.01 if sc is not None else c), key
-
-        V, X = set(), set()
-        force_x = {idx_to_num[i] for i in p.ca.force_x if idx_to_num[i] is not None}
-        for n in p.cand:
-            c, _ = cost_of(n)
-            if (id_of_num[n] in SUBPROCESS_TESTS or n in force_x or c > max(1.0, 1.25 * dur[n] / 1000.0)
-                    or (dur[n] >= GIANT_MS and c > 3.0)):
-                X.add(n)
-            else:
-                V.add(n)
-        if not V:
-            continue
-
-        def est_of(S):
-            e = JOB_OVERHEAD
-            seen = set()
-            hv = False
-            for n in S:
-                c, key = cost_of(n)
-                e += c
-                if key not in seen:
-                    seen.add(key)
-                    e += setup.get(key, 0.0)
-                if key[0] in HEAVY_FILES:
-                    hv = True
-            return e, hv
-
-        p_none = P_NONE_CODE if p.ca.py_changed else P_NONE_DATA
-        giants = {n for n in X if dur[n] >= GIANT_MS}
-        if GIANT_MODE == "smart":
-            giants = {n for n in giants if not _smart_veto(id_of_num[n], p.ca)}
-        p.cost_of = cost_of
-        skip_ok_kind = not p.ca.kinds & {"fixture", "other", "py_syntax"}
-        # A giant is never dropped blindly. test_execute_tpcds can be *probed*: run it on a few TPC-DS
-        # queries that reach the change (or a fixed spread of queries); only a passing probe (plus clean
-        # cheap evidence) lets it go. Other giants (test_max_nodes) cannot be probed and always stay.
-        p.probe = None
-        probe_n = next((n for n in giants if id_of_num[n] == PROBE_TEST), None)
-        if (GIANT_MODE == "probe" and probe_n is not None and skip_ok_kind
-                and PROBE_FIXTURE_READER not in {id_of_num[m] for m in V}):
-            idx = None
-            if probe_n in p.cost_scale and PROBE_TEST in p.filters:
-                rel = sorted(p.filters[PROBE_TEST].get(PROBE_FIXTURE, ()))
-                if rel:
-                    idx = [rel[int(i * (len(rel) - 1) / max(1, PROBE_K - 1))] for i in range(min(PROBE_K, len(rel)))]
-            if idx is None:
-                idx = list(PROBE_DEFAULT)
-            idx = sorted(set(idx))
-            p.probe = (probe_n, idx)
-            p.filters[PROBE_TEST] = {PROBE_FIXTURE: set(idx)}
-            p.cost_scale[probe_n] = (len(idx) + 0.5) / 99.0
-            V = V | {probe_n}
-            X = X - {probe_n}
-        giants = giants - ({p.probe[0]} if p.probe else set())
-        # FULL: verify all of V.  LITE: verify only tests whose local cost is well below their recorded
-        # cost (plus enough cheap tests to carry evidence); include the rest of V unverified.
-        lite = {n for n in V if cost_of(n)[0] <= 0.6 * dur[n] / 1000.0 + 0.003}
-        cheap_lite = [n for n in lite if dur[n] < CHEAP_MS]
-        if len(cheap_lite) < MIN_CHEAP_EVIDENCE:
-            extra = sorted((n for n in V - lite if dur[n] < CHEAP_MS), key=lambda n: cost_of(n)[0])
-            lite |= set(extra[: MIN_CHEAP_EVIDENCE * 2 - len(cheap_lite)])
-        options = []
-        # an executor change can only release test_execute_tpcds on the executor tests' own evidence: verify all
-        only_full = GIANT_MODE == "smart" and _exec_specific(p.ca) and any(id_of_num[n] == PROBE_TEST for n in giants)
-        for label, S in (("full", V), ("lite", lite)):
-            if not S or (label == "lite" and (S == V or only_full)):
+        try:
+            if not p.cand or not p.ca.verifiable or "fallback" in p.ca.kinds:
                 continue
-            est, heavy = est_of(S)
-            B = V - S
-            if p.probe is not None and label == "lite":
-                S = S | {p.probe[0]}
+            if any(n not in num_to_idx for n in p.cand):
+                continue
+            blind = best_schedule(p.cand, dur)[0] / 1000.0
+            # fixture-driven tests: with a function-body-only change, only the cases reaching it can differ
+            p.filters = {}
+            p.cost_scale = {}
+            case_ok = (p.ca.fn_spans and not p.ca.import_time
+                       and p.ca.kinds <= {"py_fn", "py_noop"})
+            if case_ok:
+                cdb = get_cases()
+                for n in p.cand:
+                    tid = id_of_num[n]
+                    if not cdb.has(tid):
+                        continue
+                    flt, nrel, ntot = cdb.relevant(tid, p.ca.fn_spans)
+                    if flt is not None and ntot:
+                        p.filters[tid] = flt
+                        p.cost_scale[n] = (nrel + 0.5) / ntot
+
+            def cost_of(n):
+                c, key = inc(n)
+                sc = p.cost_scale.get(n)
+                return (c * sc + 0.01 if sc is not None else c), key
+
+            V, X = set(), set()
+            force_x = {idx_to_num[i] for i in p.ca.force_x if idx_to_num[i] is not None}
+            for n in p.cand:
+                c, _ = cost_of(n)
+                if (id_of_num[n] in SUBPROCESS_TESTS or n in force_x or c > max(1.0, 1.25 * dur[n] / 1000.0)
+                        or (dur[n] >= GIANT_MS and c > 3.0)):
+                    X.add(n)
+                else:
+                    V.add(n)
+            if not V:
+                continue
+
+            def est_of(S):
+                e = JOB_OVERHEAD
+                seen = set()
+                hv = False
+                for n in S:
+                    c, key = cost_of(n)
+                    e += c
+                    if key not in seen:
+                        seen.add(key)
+                        e += setup.get(key, 0.0)
+                    if key[0] in HEAVY_FILES:
+                        hv = True
+                return e, hv
+
+            p_none = P_NONE_CODE if p.ca.py_changed else P_NONE_DATA
+            giants = {n for n in X if dur[n] >= GIANT_MS}
+            if GIANT_MODE == "smart":
+                giants = {n for n in giants if not _smart_veto(id_of_num[n], p.ca)}
+            p.cost_of = cost_of
+            skip_ok_kind = not p.ca.kinds & {"fixture", "other", "py_syntax"}
+            # A giant is never dropped blindly. test_execute_tpcds can be *probed*: run it on a few TPC-DS
+            # queries that reach the change (or a fixed spread of queries); only a passing probe (plus clean
+            # cheap evidence) lets it go. Other giants (test_max_nodes) cannot be probed and always stay.
+            p.probe = None
+            probe_n = next((n for n in giants if id_of_num[n] == PROBE_TEST), None)
+            if (GIANT_MODE == "probe" and probe_n is not None and skip_ok_kind
+                    and PROBE_FIXTURE_READER not in {id_of_num[m] for m in V}):
+                idx = None
+                if probe_n in p.cost_scale and PROBE_TEST in p.filters:
+                    rel = sorted(p.filters[PROBE_TEST].get(PROBE_FIXTURE, ()))
+                    if rel:
+                        idx = [rel[int(i * (len(rel) - 1) / max(1, PROBE_K - 1))] for i in range(min(PROBE_K, len(rel)))]
+                if idx is None:
+                    idx = list(PROBE_DEFAULT)
+                idx = sorted(set(idx))
+                p.probe = (probe_n, idx)
+                p.filters[PROBE_TEST] = {PROBE_FIXTURE: set(idx)}
+                p.cost_scale[probe_n] = (len(idx) + 0.5) / 99.0
+                V = V | {probe_n}
+                X = X - {probe_n}
+            giants = giants - ({p.probe[0]} if p.probe else set())
+            # FULL: verify all of V.  LITE: verify only tests whose local cost is well below their recorded
+            # cost (plus enough cheap tests to carry evidence); include the rest of V unverified.
+            lite = {n for n in V if cost_of(n)[0] <= 0.6 * dur[n] / 1000.0 + 0.003}
+            cheap_lite = [n for n in lite if dur[n] < CHEAP_MS]
+            if len(cheap_lite) < MIN_CHEAP_EVIDENCE:
+                extra = sorted((n for n in V - lite if dur[n] < CHEAP_MS), key=lambda n: cost_of(n)[0])
+                lite |= set(extra[: MIN_CHEAP_EVIDENCE * 2 - len(cheap_lite)])
+            options = []
+            # an executor change can only release test_execute_tpcds on the executor tests' own evidence: verify all
+            only_full = GIANT_MODE == "smart" and _exec_specific(p.ca) and any(id_of_num[n] == PROBE_TEST for n in giants)
+            for label, S in (("full", V), ("lite", lite)):
+                if not S or (label == "lite" and (S == V or only_full)):
+                    continue
+                est, heavy = est_of(S)
                 B = V - S
-            small = sum(1 for n in S if dur[n] < CHEAP_MS)
-            can_skip = bool(giants) and small >= MIN_CHEAP_EVIDENCE and skip_ok_kind and DROP_GIANTS
-            keep_none = B | ((X - giants) if can_skip else X)
-            if p.probe is not None and small < MIN_CHEAP_EVIDENCE:
-                keep_none = keep_none | {p.probe[0]}
-            cost_none = best_schedule(keep_none, dur)[0] / 1000.0
-            some = min(S, key=lambda n: dur[n])
-            cost_fail = best_schedule(X | B | {some}, dur)[0] / 1000.0
-            expected = est + p_none * cost_none + (1 - p_none) * cost_fail
-            gain = blind - expected - (HEAVY_PRELOAD if heavy and not heavy_needed else 0.0)
-            options.append((gain, label, S, est, heavy, cost_none, cost_fail))
-        if os.environ.get("BR_VERBOSE"):
-            p.ca.notes.append("options: " + ", ".join(f"{o[1]} gain {o[0]:.2f} est {o[3]:.2f} none {o[5]:.2f}" for o in options))
-        gain, label, S, est, heavy, cost_none, cost_fail = max(options, key=lambda o: o[0])
-        p.V, p.X, p.est, p.gain = S, X, est, gain
-        p.ca.notes.append(f"plan[{label}]: blind {blind:.2f} est {est:.2f} |S|={len(S)} |V|={len(V)} |X|={len(X)} "
-                          f"giants={len(giants)} cost_none {cost_none:.2f} cost_fail {cost_fail:.2f} gain {gain:.2f}")
-        if p.gain > 0.1 and not NO_VERIFY:
-            to_verify.append(p)
-            heavy_needed = heavy_needed or heavy
+                if p.probe is not None and label == "lite":
+                    S = S | {p.probe[0]}
+                    B = V - S
+                small = sum(1 for n in S if dur[n] < CHEAP_MS)
+                can_skip = bool(giants) and small >= MIN_CHEAP_EVIDENCE and skip_ok_kind and DROP_GIANTS
+                keep_none = B | ((X - giants) if can_skip else X)
+                if p.probe is not None and small < MIN_CHEAP_EVIDENCE:
+                    keep_none = keep_none | {p.probe[0]}
+                cost_none = best_schedule(keep_none, dur)[0] / 1000.0
+                some = min(S, key=lambda n: dur[n])
+                cost_fail = best_schedule(X | B | {some}, dur)[0] / 1000.0
+                expected = est + p_none * cost_none + (1 - p_none) * cost_fail
+                gain = blind - expected - (HEAVY_PRELOAD if heavy and not heavy_needed else 0.0)
+                options.append((gain, label, S, est, heavy, cost_none, cost_fail))
+            if os.environ.get("BR_VERBOSE"):
+                p.ca.notes.append("options: " + ", ".join(f"{o[1]} gain {o[0]:.2f} est {o[3]:.2f} none {o[5]:.2f}" for o in options))
+            gain, label, S, est, heavy, cost_none, cost_fail = max(options, key=lambda o: o[0])
+            p.V, p.X, p.est, p.gain = S, X, est, gain
+            p.ca.notes.append(f"plan[{label}]: blind {blind:.2f} est {est:.2f} |S|={len(S)} |V|={len(V)} |X|={len(X)} "
+                              f"giants={len(giants)} cost_none {cost_none:.2f} cost_fail {cost_fail:.2f} gain {gain:.2f}")
+            if p.gain > 0.1 and not NO_VERIFY:
+                to_verify.append(p)
+                heavy_needed = heavy_needed or heavy
+        except Exception as e:  # noqa: BLE001  planning bug: this commit simply is not verified
+            p.V, p.X = set(), set()
+            p.ca.notes.append(f"planning error {e!r}: not verified")
     to_verify.sort(key=lambda p: -p.gain / max(p.est, 0.05))
     chosen, spent = [], 0.0
     for p in to_verify:
@@ -423,48 +432,52 @@ def main():
     for p in plans:
         sel = set(p.cand)
         optional = set()
-        if p.verified is not None and set(p.verified) >= {id_of_num[n] for n in p.V}:
-            keep = set()
-            bad = False
-            for tid, st in p.verified.items():
-                n = num_of_id.get(tid)
-                if n is None:
-                    continue
-                if st in ("pass", "skip"):
-                    continue
-                keep.add(n)
-                if st != "fail":
-                    bad = True  # timeout / unknown: evidence incomplete
-            if p.probe is not None:
-                pn = p.probe[0]
-                pst = p.verified.get(id_of_num[pn])
-                cheap_ok = sum(1 for n in p.V if n != pn and dur[n] < CHEAP_MS) >= MIN_CHEAP_EVIDENCE
-                anomaly0 = p.vcpu is not None and p.vcpu > 3.0 * p.est + 0.5
-                if (keep - {pn}) or pst != "pass" or not cheap_ok or bad or anomaly0:
-                    keep.add(pn)  # the giant stays unless its probe passed on clean evidence
-                else:
-                    p.ca.notes.append(f"giant {pn} released: probe on {len(p.probe[1])} queries passed")
-            unverified = p.cand - p.V
-            giants = {n for n in unverified if dur[n] >= GIANT_MS}
-            anomaly = p.vcpu is not None and p.vcpu > 3.0 * p.est + 0.5
-            small_v = sum(1 for n in p.V if dur[n] < CHEAP_MS)
-            changed = list(p.ca.py_changed)
-            skip_giants = (DROP_GIANTS and giants and not keep and not bad and not anomaly and small_v >= MIN_CHEAP_EVIDENCE
-                           and not p.ca.kinds & {"fixture", "other", "py_syntax"}
-                           and not any(_affine(id_of_num[n], changed) for n in giants))
-            if skip_giants and GIANT_MODE == "smart":
-                exec_pass = sum(1 for n in p.V if dur[n] < CHEAP_MS and id_of_num[n].startswith(EXECUTOR_PREFIX)
-                                and p.verified.get(id_of_num[n]) == "pass")
-                veto = {n for n in giants if _smart_veto(id_of_num[n], p.ca, exec_pass)}
-                if veto:
-                    p.ca.notes.append(f"giants kept (smart veto): {sorted(veto)}")
-                giants -= veto
-                skip_giants = bool(giants)
-            if skip_giants:
-                unverified -= giants
-                optional |= giants
-                p.ca.notes.append(f"dropped giants {sorted(giants)} on evidence: {small_v} cheap tests pass")
-            sel = keep | unverified
+        try:
+            if p.verified is not None and set(p.verified) >= {id_of_num[n] for n in p.V}:
+                keep = set()
+                bad = False
+                for tid, st in p.verified.items():
+                    n = num_of_id.get(tid)
+                    if n is None:
+                        continue
+                    if st in ("pass", "skip"):
+                        continue
+                    keep.add(n)
+                    if st != "fail":
+                        bad = True  # timeout / unknown: evidence incomplete
+                if p.probe is not None:
+                    pn = p.probe[0]
+                    pst = p.verified.get(id_of_num[pn])
+                    cheap_ok = sum(1 for n in p.V if n != pn and dur[n] < CHEAP_MS) >= MIN_CHEAP_EVIDENCE
+                    anomaly0 = p.vcpu is not None and p.vcpu > 3.0 * p.est + 0.5
+                    if (keep - {pn}) or pst != "pass" or not cheap_ok or bad or anomaly0:
+                        keep.add(pn)  # the giant stays unless its probe passed on clean evidence
+                    else:
+                        p.ca.notes.append(f"giant {pn} released: probe on {len(p.probe[1])} queries passed")
+                unverified = p.cand - p.V
+                giants = {n for n in unverified if dur[n] >= GIANT_MS}
+                anomaly = p.vcpu is not None and p.vcpu > 3.0 * p.est + 0.5
+                small_v = sum(1 for n in p.V if dur[n] < CHEAP_MS)
+                changed = list(p.ca.py_changed)
+                skip_giants = (DROP_GIANTS and giants and not keep and not bad and not anomaly and small_v >= MIN_CHEAP_EVIDENCE
+                               and not p.ca.kinds & {"fixture", "other", "py_syntax"}
+                               and not any(_affine(id_of_num[n], changed) for n in giants))
+                if skip_giants and GIANT_MODE == "smart":
+                    exec_pass = sum(1 for n in p.V if dur[n] < CHEAP_MS and id_of_num[n].startswith(EXECUTOR_PREFIX)
+                                    and p.verified.get(id_of_num[n]) == "pass")
+                    veto = {n for n in giants if _smart_veto(id_of_num[n], p.ca, exec_pass)}
+                    if veto:
+                        p.ca.notes.append(f"giants kept (smart veto): {sorted(veto)}")
+                    giants -= veto
+                    skip_giants = bool(giants)
+                if skip_giants:
+                    unverified -= giants
+                    optional |= giants
+                    p.ca.notes.append(f"dropped giants {sorted(giants)} on evidence: {small_v} cheap tests pass")
+                sel = keep | unverified
+        except Exception as e:  # noqa: BLE001  a bug here must not cost a commit: keep every candidate
+            sel, optional = set(p.cand), set()
+            p.ca.notes.append(f"final selection error {e!r}: all candidates")
         cost, bins = best_schedule(sel, dur)
         if optional and bins:
             bins, _ = fill_slack(bins, dur, optional)
