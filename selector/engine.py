@@ -217,6 +217,7 @@ def _alarm(signum, frame):
 
 
 _ALWAYS = set()
+TIMES = {}
 _STATE = {"failed": False, "stop_after_fail": False}
 
 
@@ -300,6 +301,7 @@ class _TimedResult(unittest.TestResult):
     def startTest(self, test):
         super().startTest(test)
         tid = self._tid(test)
+        self._t0 = time.process_time()
         if _STATE["failed"] and _STATE["stop_after_fail"] and tid not in _ALWAYS:
             # the change already breaks something: the rest is cheaper to include than to run
             self.status[tid] = "unknown"
@@ -312,6 +314,7 @@ class _TimedResult(unittest.TestResult):
 
     def stopTest(self, test):
         signal.setitimer(signal.ITIMER_REAL, 0)
+        TIMES[self._tid(test)] = round(time.process_time() - getattr(self, "_t0", time.process_time()), 4)
         super().stopTest(test)
 
     def _mark_fail(self, test, err):
@@ -349,6 +352,11 @@ class _TimedResult(unittest.TestResult):
 
 def _child_main(root, files, test_ids, per_test_timeout, budget, tmpdir, w, opts=None):
     try:
+        # the selector's own heap (indexes, ASTs) is inherited by fork: freeze it so the cyclic GC
+        # (which several tests trigger explicitly) only walks objects created by the tests
+        import gc
+
+        gc.freeze()
         if opts:
             _ALWAYS.clear()
             _ALWAYS.update(opts.get("always", ()))
@@ -364,8 +372,12 @@ def _child_main(root, files, test_ids, per_test_timeout, budget, tmpdir, w, opts
         os.chdir(root)
         deadline = time.monotonic() + budget
         try:
+            t_imp = time.process_time()
             import sqlglot  # noqa: F401
+            TIMES["__import__"] = round(time.process_time() - t_imp, 4)
             res = _run_tests(test_ids, per_test_timeout, deadline)
+            if os.environ.get("BR_VERBOSE"):
+                res["__times__"] = TIMES
         except BaseException:  # noqa: BLE001  sqlglot itself fails to import -> everything fails
             res = {tid: "fail" for tid in test_ids}
         data = json.dumps(res).encode()
@@ -452,9 +464,13 @@ def run_many(root, jobs, deadline, parallel=2, log=None, tmpdir="/tmp/brov", bud
                     res = json.loads(b"".join(chunks).decode())
                 except ValueError:
                     res = {}
+            times = res.pop("__times__", None)
             for tid in ids:
                 res.setdefault(tid, "unknown")
             plan.verified = res
+            if times and log:
+                top = sorted(times.items(), key=lambda kv: -kv[1])[:6]
+                log(f"    times {getattr(plan, 'cid', k)}: " + ", ".join(f"{t.rsplit('::', 1)[-1]}={v}" for t, v in top))
             stats[k] = (ru.ru_utime + ru.ru_stime, time.monotonic() - ts)
             if log:
                 nf = sum(1 for s in res.values() if s != "pass")

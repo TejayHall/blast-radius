@@ -24,6 +24,10 @@ ROOT = os.environ.get("BR_SQLGLOT", "/sqlglot")
 W = 2000
 
 HEAVY_FILES = {"tests/test_optimizer.py", "tests/test_executor.py"}
+# Tests that check `import sqlglot` in a fresh interpreter: local runs cannot see the patch (the
+# subprocess imports the unpatched tree) and the differential import cannot see "eagerly imported"
+# changes. Never verify them; add them for any import-time change to a module they load.
+SUBPROCESS_TESTS = {"tests/dialects/test_dialect.py::TestDialect::test_lazy_load"}
 JOB_OVERHEAD = 0.12      # s CPU: fork + fresh sqlglot import + overlay compile (child)
 DIFF_COST = 1.0          # s CPU: one differential import (typical)
 HEAVY_PRELOAD = 0.70     # s CPU once: duckdb/pandas/numpy in the zygote
@@ -57,6 +61,23 @@ def class_setup_costs(ix):
         f, cls, _ = tid.split("::")
         by_cls.setdefault((f, cls), []).append(ix.e[i])
     return {k: max(0.0, min(v) - 0.004) for k, v in by_cls.items()}
+
+
+def _may_change_imports(text):
+    """Could this patch change which modules `import sqlglot` loads? (import statements touched, or a
+    package __init__ edited)."""
+    cur = ""
+    for line in text.splitlines():
+        if line.startswith("+++ ") or line.startswith("--- "):
+            cur = line[4:].strip()
+            if cur.endswith("__init__.py") and "sqlglot/" in cur:
+                return True
+            continue
+        if line[:1] in "+-" and not line.startswith(("+++", "---")) and "sqlglot/" in cur:
+            body = line[1:].strip()
+            if body.startswith(("import ", "from ")) or "import_module" in body or "__import__" in body:
+                return True
+    return False
 
 
 def _affine(test_id, changed_paths):
@@ -98,6 +119,14 @@ def main():
             text = fh.read()
         ca = an.analyze(cid, text)
         cand = {idx_to_num[i] for i in ca.cand if idx_to_num[i] is not None}
+        if ca.import_time and _may_change_imports(text):
+            for tid in SUBPROCESS_TESTS:
+                i = ix.pos.get(tid)
+                n = num_of_id.get(tid)
+                if i is None or n is None:
+                    continue
+                if any(i in ix.file_any(fp) for fp in ca.files if fp.startswith("sqlglot/") and fp.endswith(".py")):
+                    cand.add(n)
         if unknown_nums and (ca.py_changed or "fallback" in ca.kinds or "fixture" in ca.kinds):
             cand |= set(unknown_nums)
         plans.append(Plan(cid, ca, cand))
@@ -154,34 +183,56 @@ def main():
         V, X = set(), set()
         for n in p.cand:
             c, _ = inc(n)
-            if dur[n] >= GIANT_MS or c > max(1.0, 1.25 * dur[n] / 1000.0):
+            if dur[n] >= GIANT_MS or c > max(1.0, 1.25 * dur[n] / 1000.0) or id_of_num[n] in SUBPROCESS_TESTS:
                 X.add(n)
             else:
                 V.add(n)
         if not V:
             continue
-        est = JOB_OVERHEAD
-        seen = set()
-        heavy = False
-        for n in V:
-            c, key = inc(n)
-            est += c
-            if key not in seen:
-                seen.add(key)
-                est += setup.get(key, 0.0)
-            if key[0] in HEAVY_FILES:
-                heavy = True
+
+        def est_of(S):
+            e = JOB_OVERHEAD
+            seen = set()
+            hv = False
+            for n in S:
+                c, key = inc(n)
+                e += c
+                if key not in seen:
+                    seen.add(key)
+                    e += setup.get(key, 0.0)
+                if key[0] in HEAVY_FILES:
+                    hv = True
+            return e, hv
+
         p_none = P_NONE_CODE if p.ca.py_changed else P_NONE_DATA
         giants = {n for n in X if dur[n] >= GIANT_MS}
-        small_v = sum(1 for n in V if dur[n] < CHEAP_MS)
-        can_skip = bool(giants) and small_v >= MIN_CHEAP_EVIDENCE and not p.ca.kinds & {"fixture", "other", "py_syntax"}
-        x_if_none = (X - giants) if can_skip else X
-        cost_none = best_schedule(x_if_none, dur)[0] / 1000.0
-        some = min(V, key=lambda n: dur[n])
-        cost_fail = best_schedule(X | {some}, dur)[0] / 1000.0
-        expected = est + p_none * cost_none + (1 - p_none) * cost_fail
-        p.V, p.X, p.est = V, X, est
-        p.gain = blind - expected - (HEAVY_PRELOAD if heavy and not heavy_needed else 0.0)
+        skip_ok_kind = not p.ca.kinds & {"fixture", "other", "py_syntax"}
+        # FULL: verify all of V.  LITE: verify only tests whose local cost is well below their recorded
+        # cost (plus enough cheap tests to carry evidence); include the rest of V unverified.
+        lite = {n for n in V if inc(n)[0] <= 0.6 * dur[n] / 1000.0 + 0.003}
+        cheap_lite = [n for n in lite if dur[n] < CHEAP_MS]
+        if len(cheap_lite) < MIN_CHEAP_EVIDENCE:
+            extra = sorted((n for n in V - lite if dur[n] < CHEAP_MS), key=lambda n: inc(n)[0])
+            lite |= set(extra[: MIN_CHEAP_EVIDENCE * 2 - len(cheap_lite)])
+        options = []
+        for label, S in (("full", V), ("lite", lite)):
+            if not S or (label == "lite" and S == V):
+                continue
+            est, heavy = est_of(S)
+            B = V - S
+            small = sum(1 for n in S if dur[n] < CHEAP_MS)
+            can_skip = bool(giants) and small >= MIN_CHEAP_EVIDENCE and skip_ok_kind
+            keep_none = B | ((X - giants) if can_skip else X)
+            cost_none = best_schedule(keep_none, dur)[0] / 1000.0
+            some = min(S, key=lambda n: dur[n])
+            cost_fail = best_schedule(X | B | {some}, dur)[0] / 1000.0
+            expected = est + p_none * cost_none + (1 - p_none) * cost_fail
+            gain = blind - expected - (HEAVY_PRELOAD if heavy and not heavy_needed else 0.0)
+            options.append((gain, label, S, est, heavy, cost_none, cost_fail))
+        gain, label, S, est, heavy, cost_none, cost_fail = max(options, key=lambda o: o[0])
+        p.V, p.X, p.est, p.gain = S, X, est, gain
+        p.ca.notes.append(f"plan[{label}]: blind {blind:.2f} est {est:.2f} |S|={len(S)} |V|={len(V)} |X|={len(X)} "
+                          f"giants={len(giants)} cost_none {cost_none:.2f} cost_fail {cost_fail:.2f} gain {gain:.2f}")
         if p.gain > 0.1:
             to_verify.append(p)
             heavy_needed = heavy_needed or heavy

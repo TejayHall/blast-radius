@@ -80,6 +80,9 @@ def path_to_module(rel):
 
 def _child(root, files, w, tmpdir):
     try:
+        import gc
+
+        gc.freeze()
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, 1)
         os.dup2(devnull, 2)
