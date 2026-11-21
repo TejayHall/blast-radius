@@ -20,23 +20,54 @@ import time
 import unittest
 
 
+class _LazyFuture(concurrent.futures.Future):
+    """A future that is already 'finished' for wait()/as_completed() but computes on first result().
+    Tests that fail stop at their first failing subtest, so later tasks are never computed."""
+
+    def __init__(self, thunk):
+        super().__init__()
+        self._thunk = thunk
+        self._state = concurrent.futures._base.FINISHED
+
+    def _eval(self):
+        th = self._thunk
+        if th is not None:
+            self._thunk = None
+            try:
+                self._result = th()
+            except BaseException as e:  # noqa: BLE001
+                self._exception = e
+
+    def result(self, timeout=None):
+        self._eval()
+        if self._exception is not None:
+            raise self._exception
+        return self._result
+
+    def exception(self, timeout=None):
+        self._eval()
+        return self._exception
+
+
 class _InlineExecutor:
+    """Stand-in for ProcessPoolExecutor: runs tasks in-process, lazily, with pickle round trips so the
+    serialization paths a real pool exercises still run."""
+
     def __init__(self, max_workers=None, mp_context=None, initializer=None, initargs=(), **kw):
         if initializer is not None:
             initializer(*pickle.loads(pickle.dumps(initargs)))
 
     def submit(self, fn, /, *args, **kwargs):
-        f = concurrent.futures.Future()
-        try:
-            fn2, a2, k2 = pickle.loads(pickle.dumps((fn, args, kwargs)))
-            res = fn2(*a2, **k2)
-            f.set_result(pickle.loads(pickle.dumps(res)))
-        except BaseException as e:  # noqa: BLE001
-            f.set_exception(e)
-        return f
+        blob = pickle.dumps((fn, args, kwargs))
+
+        def thunk():
+            fn2, a2, k2 = pickle.loads(blob)
+            return pickle.loads(pickle.dumps(fn2(*a2, **k2)))
+
+        return _LazyFuture(thunk)
 
     def map(self, fn, *iterables, timeout=None, chunksize=1):
-        return iter([self.submit(fn, *a).result() for a in zip(*iterables)])
+        return (self.submit(fn, *a).result() for a in zip(*iterables))
 
     def shutdown(self, wait=True, cancel_futures=False):
         return None
@@ -46,6 +77,18 @@ class _InlineExecutor:
 
     def __exit__(self, *a):
         return False
+
+
+class _NoDiff:
+    """unittest only needs to know that a comparison failed; skip building (quadratic) diffs."""
+
+    @staticmethod
+    def ndiff(a, b, *args, **kw):
+        return iter(["(diff omitted)"])
+
+    @staticmethod
+    def unified_diff(*a, **k):
+        return iter(["(diff omitted)"])
 
 
 class _OverlayFinder(importlib.abc.MetaPathFinder):
@@ -176,6 +219,9 @@ def _alarm(signum, frame):
 def _run_tests(test_ids, per_test_timeout, budget_deadline):
     """Run tests grouped by class. Returns {test_id: 'pass'|'fail'|'timeout'|'skip'|'unknown'}."""
     concurrent.futures.ProcessPoolExecutor = _InlineExecutor
+    import unittest.case as _uc
+
+    _uc.difflib = _NoDiff
     out = {}
     groups = {}
     order = []
@@ -235,6 +281,11 @@ class _TimedResult(unittest.TestResult):
         self.per = per_test_timeout
         self.deadline = deadline
         self.class_error = False
+        # a failing subtest already decides the test: unittest then raises _ShouldStop inside the test
+        self.failfast = True
+
+    def stop(self):
+        return None  # failfast must stop the current test only, never the suite
 
     def _tid(self, test):
         tc = getattr(test, "test_case", test)  # _SubTest -> parent
@@ -263,26 +314,25 @@ class _TimedResult(unittest.TestResult):
         else:
             self.status[tid] = "fail"
 
+    # no traceback formatting: only the verdict matters
     def addError(self, test, err):
-        super().addError(test, err)
         self._mark_fail(test, err)
 
     def addFailure(self, test, err):
-        super().addFailure(test, err)
         self._mark_fail(test, err)
 
     def addSubTest(self, test, subtest, err):
-        super().addSubTest(test, subtest, err)
         if err is not None:
             self._mark_fail(subtest, err)
 
     def addUnexpectedSuccess(self, test):
-        super().addUnexpectedSuccess(test)
         self.status[self._tid(test)] = "fail"
 
     def addSkip(self, test, reason):
-        super().addSkip(test, reason)
         self.status[self._tid(test)] = "skip"
+
+    def addExpectedFailure(self, test, err):
+        return None
 
 
 def _child_main(root, files, test_ids, per_test_timeout, budget, tmpdir, w):
