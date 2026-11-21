@@ -54,24 +54,28 @@ class Fingerprinter:
         return r
 
     def _x(self, v, ed):
-        """Fingerprint of a sqlglot expression tree (args only), not limited by the generic depth."""
+        """Fingerprint of a sqlglot expression tree, not limited by the generic depth (memoised)."""
         key = id(v)
         r = self.memo.get(key)
         if r is not None:
             return r
-        t = type(v)
         if ed > 400:
-            return _d("deepX", t.__qualname__)
-        self.memo[key] = _d("cycle", t.__qualname__)
+            return _d("deepX", type(v).__qualname__)
+        self.memo[key] = _d("cycle", type(v).__qualname__)  # provisional (cycles)
+        r = self._xbody(v, ed)
+        self.memo[key] = r
+        return r
+
+    def _xbody(self, v, ed):
+        """Digest of one expression node: its args (recursively) plus comments, type and meta."""
+        t = type(v)
         parts = sorted(_d(k) + self._xa(x, ed + 1) for k, x in v.args.items())
         extra = b""
         for attr in ("comments", "_type", "_meta"):
             val = getattr(v, attr, None)
             if val:
                 extra += _d(attr) + self._xa(val, ed + 1)
-        r = _d("X", t.__module__, t.__qualname__, b"".join(parts), extra)
-        self.memo[key] = r
-        return r
+        return _d("X", t.__module__, t.__qualname__, b"".join(parts), extra)
 
     def _xa(self, x, ed):
         a = getattr(x, "args", None)
@@ -153,7 +157,7 @@ class Fingerprinter:
         if isinstance(args, dict) and hasattr(v, "arg_types"):  # sqlglot Expression instance
             # whole tree, whatever its depth: SQL templates parsed at import time are deep, and a parser
             # change that runs at import can alter them anywhere
-            return self._x(v, 0)
+            return self._xbody(v, 0)  # v() already holds the provisional memo entry for v
         dd = getattr(v, "__dict__", None)
         if isinstance(dd, dict):
             return _d("O", t.__module__, t.__qualname__,
