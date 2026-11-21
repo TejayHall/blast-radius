@@ -53,6 +53,35 @@ class Fingerprinter:
         self.code_memo[co] = r
         return r
 
+    def _x(self, v, ed):
+        """Fingerprint of a sqlglot expression tree (args only), not limited by the generic depth."""
+        key = id(v)
+        r = self.memo.get(key)
+        if r is not None:
+            return r
+        t = type(v)
+        if ed > 400:
+            return _d("deepX", t.__qualname__)
+        self.memo[key] = _d("cycle", t.__qualname__)
+        parts = sorted(_d(k) + self._xa(x, ed + 1) for k, x in v.args.items())
+        extra = b""
+        for attr in ("comments", "_type", "_meta"):
+            val = getattr(v, attr, None)
+            if val:
+                extra += _d(attr) + self._xa(val, ed + 1)
+        r = _d("X", t.__module__, t.__qualname__, b"".join(parts), extra)
+        self.memo[key] = r
+        return r
+
+    def _xa(self, x, ed):
+        a = getattr(x, "args", None)
+        if isinstance(a, dict) and hasattr(x, "arg_types"):
+            return self._x(x, ed)
+        tx = type(x)
+        if tx is list or tx is tuple:
+            return _d(tx.__name__, b"".join(self._xa(y, ed) for y in x))
+        return self.v(x, 1)
+
     def v(self, v, depth=0):
         t = type(v)
         if t in _LIT:
@@ -61,7 +90,7 @@ class Fingerprinter:
         r = self.memo.get(key)
         if r is not None:
             return r
-        if depth > 8:
+        if depth > 40:
             return _d("deep", t.__qualname__)
         self.memo[key] = _d("cycle", t.__qualname__)  # provisional (cycles)
         r = self._v(v, t, depth)
@@ -122,7 +151,9 @@ class Fingerprinter:
             return _d("sub", t.__module__, t.__qualname__, self._v(v, type.__mro__ and next(b for b in t.__mro__ if b in (dict, list, tuple, set, frozenset)), depth))
         args = getattr(v, "args", None)
         if isinstance(args, dict) and hasattr(v, "arg_types"):  # sqlglot Expression instance
-            return _d("X", t.__module__, t.__qualname__, self.v(args, depth + 1))
+            # whole tree, whatever its depth: SQL templates parsed at import time are deep, and a parser
+            # change that runs at import can alter them anywhere
+            return self._x(v, 0)
         dd = getattr(v, "__dict__", None)
         if isinstance(dd, dict):
             return _d("O", t.__module__, t.__qualname__,

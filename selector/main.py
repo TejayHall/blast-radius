@@ -47,7 +47,7 @@ CLASS_LOADED_FIXTURES = {
 }
 # Giant tests (>= 9 s): "drop" = release on clean cheap evidence, "probe" = also require a passing probe of
 # test_execute_tpcds on a few queries, "keep" = always include.
-GIANT_MODE = os.environ.get("BR_GIANT_MODE", "keep")
+GIANT_MODE = os.environ.get("BR_GIANT_MODE", "smart")
 # "smart" = "drop", except where a giant checks behaviour that no cheap test sees: test_execute_tpcds for the
 # executor's own code (planner, Python executor and its code generator), test_max_nodes for the parser's node
 # limit.
