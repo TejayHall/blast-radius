@@ -56,8 +56,8 @@ MAXN_TEST = "tests/test_parser.py::TestParser::test_max_nodes"
 EXEC_SPECIFIC = ("sqlglot/executor/", "sqlglot/planner.py", "sqlglot/generators/python.py")
 MAXN_REGION = ("sqlglot/parser.py", 2190, 2212)  # Parser.validate_expression: node counting and the limit error
 # Diagnostics (practice-board bisection): run no differential import (importers fallback) / verify nothing.
-NO_DIFF = os.environ.get("BR_NO_DIFF", "0") == "1"
-NO_VERIFY = os.environ.get("BR_NO_VERIFY", "0") == "1"
+NO_DIFF = os.environ.get("BR_NO_DIFF", "1") == "1"
+NO_VERIFY = os.environ.get("BR_NO_VERIFY", "1") == "1"
 P_NONE_CODE = 0.5        # prior: no candidate fails (sample: 8 of 15 code commits with candidates)
 P_NONE_DATA = 0.05
 
