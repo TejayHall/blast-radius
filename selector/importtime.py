@@ -106,6 +106,9 @@ def _find_def(tree, qual):
     return node
 
 
+V1_MAPPING = os.environ.get("BR_V1_MAPPING", "0") == "1"  # diagnostics: v1's broader mapping
+
+
 def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=()):
     C = set()
     patched_modules = set(patched_modules)
@@ -121,7 +124,9 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(
         C |= c
     for mod, tag, key, typ in res.get("changes", []):
         if typ == "function_code":
-            continue
+            if not V1_MAPPING:
+                continue
+            typ = "function"
         path = module_to_path(root, mod)
         if typ == "ref":
             # a global that refers to an object defined elsewhere (an import) was added, removed or
@@ -184,7 +189,7 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(
         imp = ix.file_any(path)
         c = users & imp
         subs = res.get("subclasses", {}).get(qual)
-        if subs and kind == "C":
+        if subs and kind == "C" and not V1_MAPPING:
             # an Expression class attribute is read through instances of the class (or a subclass), by
             # code naming the class, or by generic walks over the class registries
             near = set()
