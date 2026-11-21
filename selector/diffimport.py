@@ -115,7 +115,36 @@ def _child(root, files, w, tmpdir):
             for tag, key, typ in F.diff(base["snap"].get(m, {}), snap.get(m, {})):
                 changes.append((m, tag, key, typ))
         new_failed = {m: e for m, e in failed.items() if m not in base["failed"]}
-        data = json.dumps({"changes": changes, "failed": new_failed}).encode()
+        subs = {}
+        for _m, tag, _k, _t in changes:
+            if not tag.startswith("C:sqlglot.expressions"):
+                continue
+            qual = tag[2:].rsplit(":", 1)[0]
+            if qual in subs:
+                continue
+            cls = None
+            parts = qual.split(".")
+            for i in range(len(parts), 0, -1):
+                mm = sys.modules.get(".".join(parts[:i]))
+                if mm is not None:
+                    try:
+                        cls = mm
+                        for part in parts[i:]:
+                            cls = getattr(cls, part)
+                    except AttributeError:
+                        cls = None
+                    break
+            if isinstance(cls, type):
+                seen, work = set(), [cls]
+                while work:
+                    c = work.pop()
+                    q = f"{c.__module__}.{c.__qualname__}"
+                    if q in seen:
+                        continue
+                    seen.add(q)
+                    work.extend(c.__subclasses__())
+                subs[qual] = sorted(seen)
+        data = json.dumps({"changes": changes, "failed": new_failed, "subclasses": subs}).encode()
         view = memoryview(data)
         while view:
             n = os.write(w, view)

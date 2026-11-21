@@ -203,15 +203,26 @@ def main():
         deadline = t0 + wall_budget
         jobs = []
         for p in chosen:
-            ids = [id_of_num[n] for n in sorted(p.V)]
+            # cheapest classes first, cheapest tests first within a class (setUpClass runs once)
+            by_cls = {}
+            for n in p.V:
+                c, key = inc(n)
+                by_cls.setdefault(key, []).append((c, n))
+            keys_sorted = sorted(by_cls, key=lambda k: setup.get(k, 0.0) + min(x[0] for x in by_cls[k]))
+            ids = []
+            for k in keys_sorted:
+                ids.extend(id_of_num[n] for _, n in sorted(by_cls[k]))
             per = {}
+            always = []
             for n in p.V:
                 c, _ = inc(n)
                 per[id_of_num[n]] = max(2.0, 5.0 * c + 1.0)
-            jobs.append((p, ids, per))
+                if c < 0.5 * dur[n] / 1000.0 and dur[n] >= 300:
+                    always.append(id_of_num[n])
+            jobs.append((p, ids, per, {"always": always, "stop_after_fail": True}))
         stats = engine.run_many(ROOT, jobs, deadline, parallel=2, log=log)
-        for (p, _, _), (cpu, wall) in zip(jobs, stats):
-            p.vcpu = cpu
+        for job, (cpu, wall) in zip(jobs, stats):
+            job[0].vcpu = cpu
 
     # ---- final selections ----
     out = []
@@ -219,7 +230,7 @@ def main():
     for p in plans:
         sel = set(p.cand)
         optional = set()
-        if p.verified is not None:
+        if p.verified is not None and set(p.verified) >= {id_of_num[n] for n in p.V}:
             keep = set()
             bad = False
             for tid, st in p.verified.items():
@@ -259,5 +270,51 @@ def main():
     log(f"total simulated {total_ms/1000:.1f}s, wall {time.monotonic() - t0:.2f}s")
 
 
+_WROTE = [False]
+
+
+def _safe_fallback(exc):
+    """Last line of defence: never let a bug reject the run. Re-run the (sound) static analysis alone,
+    and if even that fails, select every test for every commit."""
+    import traceback
+
+    log("FATAL in selector, falling back:", repr(exc))
+    if _WROTE[0]:
+        return
+    traceback.print_exc(file=sys.stderr)
+    tests = json.load(open(os.path.join(DATA, "tests.json"), encoding="utf-8"))["tests"]
+    dur = {t["number"]: int(round(t["seconds"] * 1000)) for t in tests}
+    num_of_id = {t["id"]: t["number"] for t in tests}
+    cdir = os.path.join(DATA, "commits")
+    names = sorted(f for f in os.listdir(cdir) if f.endswith(".patch"))
+    try:
+        ix = Index()
+        an = Analyzer(ix, ROOT)
+        idx_to_num = [num_of_id.get(tid) for tid in ix.ids]
+    except Exception:  # noqa: BLE001
+        an = None
+    out = []
+    for fn in names:
+        sel = set(dur)
+        if an is not None:
+            try:
+                with open(os.path.join(cdir, fn), encoding="utf-8", errors="surrogateescape", newline="") as fh:
+                    ca = an.analyze(fn[:-6], fh.read())
+                c = {idx_to_num[i] for i in (ca.cand | ca.diff_fallback) if idx_to_num[i] is not None}
+                known = {n for n in idx_to_num if n is not None}
+                sel = c | (set(dur) - known)
+            except Exception:  # noqa: BLE001
+                sel = set(dur)
+        _, bins = best_schedule(sel, dur)
+        out.append(json.dumps({"commit": fn[:-6], "workers": bins}, separators=(",", ":")))
+    sys.stdout.write("\n".join(out) + ("\n" if out else ""))
+    sys.stdout.flush()
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException as e:  # noqa: BLE001
+        if isinstance(e, SystemExit) and not e.code:
+            raise
+        _safe_fallback(e)

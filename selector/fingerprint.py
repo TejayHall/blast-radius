@@ -313,6 +313,8 @@ def diff(old, new):
             da, db = a[1], b[1]
             if set(da) != set(db):
                 out.append((tag, "#len", "dict"))
+                if bool(da) != bool(db):
+                    out.append((tag, "#bool", "dict"))
             for k in set(da) | set(db):
                 if da.get(k) != db.get(k):
                     out.append((tag, k, "dict"))
@@ -320,6 +322,8 @@ def diff(old, new):
             sa, sb = a[1], b[1]
             if len(sa) != len(sb):
                 out.append((tag, "#len", "set"))
+                if bool(sa) != bool(sb):
+                    out.append((tag, "#bool", "set"))
             for k in sa ^ sb:
                 out.append((tag, k, "set"))
     return out

@@ -127,7 +127,7 @@ class TDict(dict):
         return (dict, (dict(dict.items(self)),))
 
     def __bool__(self):
-        _rec(self._tag, "#len")
+        _rec(self._tag, "#bool")
         return dict.__len__(self) > 0
 
     __hash__ = None
@@ -152,7 +152,7 @@ def _mkset(base):
             return base.__len__(self)
 
         def __bool__(self):
-            _rec(self._tag, "#len")
+            _rec(self._tag, "#bool")
             return base.__len__(self) > 0
 
     for m in ("__iter__", "__or__", "__and__", "__sub__", "__xor__", "__ror__", "__rand__", "__rsub__",

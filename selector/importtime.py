@@ -60,6 +60,9 @@ class Keys:
             out |= self.tests(d.get(k))
         return out
 
+    def inst_tests(self, qual):
+        return self.tests(self.inst.get(qual))
+
     def any_access(self, tag):
         d = self.acc.get(tag)
         out = set()
@@ -148,6 +151,21 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes):
         users = analyzer.runtime_name_users(attr)
         imp = ix.file_any(path)
         c = users & imp
+        subs = res.get("subclasses", {}).get(qual)
+        if subs and kind == "C":
+            # an Expression class attribute is read through instances of the class (or a subclass), by
+            # code naming the class, or by generic walks over the class registries
+            near = set()
+            for q in subs:
+                near |= keys.inst_tests(q)
+            near |= analyzer.runtime_name_users(qual.rsplit(".", 1)[-1])
+            for reg in ("ALL_FUNCTIONS", "EXPR_CLASSES", "FUNCTION_BY_NAME", "subclasses", "__subclasses__"):
+                near |= analyzer.runtime_name_users(reg)
+            c2 = c & near
+            notes.append(f"diff: {tag} ({typ}) -> name users {len(users)} & importers {len(imp)} = {len(c)}; "
+                         f"via instances/registries {len(c2)}")
+            C |= c2
+            continue
         notes.append(f"diff: {tag} ({typ}) -> name users {len(users)} & importers {len(imp)} = {len(c)}")
         C |= c
     return C

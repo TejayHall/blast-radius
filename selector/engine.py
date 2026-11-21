@@ -216,6 +216,10 @@ def _alarm(signum, frame):
     raise _Timeout()
 
 
+_ALWAYS = set()
+_STATE = {"failed": False, "stop_after_fail": False}
+
+
 def _run_tests(test_ids, per_test_timeout, budget_deadline):
     """Run tests grouped by class. Returns {test_id: 'pass'|'fail'|'timeout'|'skip'|'unknown'}."""
     concurrent.futures.ProcessPoolExecutor = _InlineExecutor
@@ -283,6 +287,7 @@ class _TimedResult(unittest.TestResult):
         self.class_error = False
         # a failing subtest already decides the test: unittest then raises _ShouldStop inside the test
         self.failfast = True
+        self._ours = set()
 
     def stop(self):
         return None  # failfast must stop the current test only, never the suite
@@ -295,6 +300,11 @@ class _TimedResult(unittest.TestResult):
     def startTest(self, test):
         super().startTest(test)
         tid = self._tid(test)
+        if _STATE["failed"] and _STATE["stop_after_fail"] and tid not in _ALWAYS:
+            # the change already breaks something: the rest is cheaper to include than to run
+            self.status[tid] = "unknown"
+            self._ours.add(tid)
+            raise unittest.SkipTest("stopped after first failure")
         self.status[tid] = "pass"
         lim = self.per.get(tid, 30.0) if isinstance(self.per, dict) else self.per
         lim = min(lim, max(0.05, self.deadline - time.monotonic()))
@@ -313,6 +323,7 @@ class _TimedResult(unittest.TestResult):
             self.status[tid] = "timeout"
         else:
             self.status[tid] = "fail"
+        _STATE["failed"] = True
 
     # no traceback formatting: only the verdict matters
     def addError(self, test, err):
@@ -329,14 +340,19 @@ class _TimedResult(unittest.TestResult):
         self.status[self._tid(test)] = "fail"
 
     def addSkip(self, test, reason):
-        self.status[self._tid(test)] = "skip"
+        tid = self._tid(test)
+        self.status[tid] = "unknown" if tid in self._ours else "skip"
 
     def addExpectedFailure(self, test, err):
         return None
 
 
-def _child_main(root, files, test_ids, per_test_timeout, budget, tmpdir, w):
+def _child_main(root, files, test_ids, per_test_timeout, budget, tmpdir, w, opts=None):
     try:
+        if opts:
+            _ALWAYS.clear()
+            _ALWAYS.update(opts.get("always", ()))
+            _STATE["stop_after_fail"] = bool(opts.get("stop_after_fail"))
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, 1)
         os.dup2(devnull, 2)
@@ -361,12 +377,12 @@ def _child_main(root, files, test_ids, per_test_timeout, budget, tmpdir, w):
         os._exit(0)
 
 
-def _start(root, files, test_ids, per_test_timeout, budget, tmpdir):
+def _start(root, files, test_ids, per_test_timeout, budget, tmpdir, opts=None):
     r, w = os.pipe()
     pid = os.fork()
     if pid == 0:
         os.close(r)
-        _child_main(root, files, test_ids, per_test_timeout, budget, tmpdir, w)
+        _child_main(root, files, test_ids, per_test_timeout, budget, tmpdir, w, opts)
     os.close(w)
     return pid, r
 
@@ -396,11 +412,12 @@ def run_many(root, jobs, deadline, parallel=2, log=None, tmpdir="/tmp/brov", bud
         now = time.monotonic()
         while pending and len(running) < parallel and now < deadline - 1.0:
             k = pending.pop(0)
-            plan, ids, per = jobs[k]
+            plan, ids, per = jobs[k][:3]
+            opts = jobs[k][3] if len(jobs[k]) > 3 else None
             files = plan.ca.files if hasattr(plan, "ca") else plan.files
             b = budget_of(plan) if budget_of else min(deadline - now - 0.5, 4.0 * getattr(plan, "est", 5.0) + 5.0)
             b = max(0.5, b)
-            pid, r = _start(root, files, ids, per, b, tmpdir)
+            pid, r = _start(root, files, ids, per, b, tmpdir, opts)
             running[r] = (k, pid, now, [], now + b + 2.0)
         if not running:
             for k in pending:
@@ -428,7 +445,7 @@ def run_many(root, jobs, deadline, parallel=2, log=None, tmpdir="/tmp/brov", bud
             k, pid, ts, chunks, _ = running.pop(r)
             os.close(r)
             _, status, ru = os.wait4(pid, 0)
-            plan, ids, per = jobs[k]
+            plan, ids, per = jobs[k][:3]
             res = {}
             if not killed:
                 try:
