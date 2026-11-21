@@ -51,13 +51,16 @@ class Keys:
         rm = self.remap
         return {rm[i] for i in self.sets[sid]}
 
+    aliases = {}
+
     def accessors(self, tag, keys):
-        d = self.acc.get(tag)
         out = set()
-        if not d:
-            return out
-        for k in keys:
-            out |= self.tests(d.get(k))
+        for t in (tag, *self.aliases.get(tag, ())):
+            d = self.acc.get(t)
+            if not d:
+                continue
+            for k in keys:
+                out |= self.tests(d.get(k))
         return out
 
     def inst_tests(self, qual):
@@ -72,11 +75,12 @@ class Keys:
         return out
 
     def any_access(self, tag):
-        d = self.acc.get(tag)
         out = set()
-        if d:
-            for sid in d.values():
-                out |= self.tests(sid)
+        for t in (tag, *self.aliases.get(tag, ())):
+            d = self.acc.get(t)
+            if d:
+                for sid in d.values():
+                    out |= self.tests(sid)
         return out
 
 

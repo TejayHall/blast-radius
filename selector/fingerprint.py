@@ -355,9 +355,88 @@ def module_deps(prefix="sqlglot"):
                     if isinstance(vv, type):
                         for b in vv.__mro__:
                             d.add(b.__module__)
+        d |= _static_imports(mod, name)
         d.discard(name)
         deps[name] = sorted(x for x in d if x == prefix or x.startswith(prefix + "."))
     return deps
+
+
+def _static_imports(mod, name):
+    """Modules a module imports at import time (module/class level, not inside functions), from its source.
+    Catches `from x import CONSTANT`, whose value carries no __module__ for the object-based scan."""
+    import ast
+
+    path = getattr(mod, "__file__", None)
+    out = set()
+    if not path or not path.endswith(".py"):
+        return out
+    try:
+        tree = ast.parse(open(path, encoding="utf-8").read())
+    except (OSError, SyntaxError, ValueError):
+        return out
+    is_pkg = path.endswith("__init__.py")
+    pkg_parts = name.split(".") if is_pkg else name.split(".")[:-1]
+
+    def visit(body):
+        for st in body:
+            if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if isinstance(st, ast.Import):
+                for a in st.names:
+                    out.add(a.name)
+            elif isinstance(st, ast.ImportFrom):
+                if st.level:
+                    base = pkg_parts[: len(pkg_parts) - (st.level - 1)] if st.level > 1 else pkg_parts
+                    mod_name = ".".join(base + ([st.module] if st.module else []))
+                else:
+                    mod_name = st.module or ""
+                if mod_name:
+                    for a in st.names:
+                        sub = f"{mod_name}.{a.name}"
+                        # `from pkg import submodule` depends on the submodule; any other name on mod's state
+                        out.add(sub if sub in sys.modules else mod_name)
+            for field in ("body", "orelse", "finalbody", "handlers"):
+                sub = getattr(st, field, None)
+                if isinstance(sub, list) and sub and not isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    visit([x for x in sub if isinstance(x, ast.stmt)] or [h for h in sub if hasattr(h, "body")])
+            if isinstance(st, ast.Try):
+                for h in st.handlers:
+                    visit(h.body)
+
+    visit(tree.body)
+    return {m for m in out if m in sys.modules}
+
+
+def container_aliases(prefix="sqlglot"):
+    """{tag: [other tags]} for dict/set attributes that are the same object under several names (one module
+    importing another's table, a class attribute bound to a module constant). Key-access traces record a
+    shared object under a single name, so accessors must be looked up under all of them."""
+    groups = {}
+    for name, mod in list(sys.modules.items()):
+        if mod is None or not (name == prefix or name.startswith(prefix + ".")):
+            continue
+        for k, v in list(vars(mod).items()):
+            if type(v) in (dict, set, frozenset):
+                groups.setdefault(id(v), []).append(f"M:{name}:{k}")
+        stack = [v for v in vars(mod).values() if isinstance(v, type) and v.__module__ == name]
+        seen = set()
+        while stack:
+            c = stack.pop()
+            if id(c) in seen:
+                continue
+            seen.add(id(c))
+            for k, v in list(c.__dict__.items()):
+                if isinstance(v, type) and v.__module__ == name and v.__qualname__.startswith(c.__qualname__ + "."):
+                    stack.append(v)
+                    continue
+                if type(v) in (dict, set, frozenset):
+                    groups.setdefault(id(v), []).append(f"C:{c.__module__}.{c.__qualname__}:{k}")
+    out = {}
+    for tags in groups.values():
+        if len(tags) > 1:
+            for t in tags:
+                out[t] = [x for x in tags if x != t]
+    return out
 
 
 def diff(old, new):

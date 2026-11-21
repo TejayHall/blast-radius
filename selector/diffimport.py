@@ -39,8 +39,10 @@ def build_snapshot(root="/sqlglot", path=STATE_PATH, noisy=None):
     for n, ds in deps.items():
         for m in ds:
             rdeps.setdefault(m, []).append(n)
+    aliases = F.container_aliases()
     with open(path, "wb") as fh:
-        marshal.dump({"snap": snap, "failed": failed, "rdeps": rdeps, "noisy": sorted(noisy or ())}, fh)
+        marshal.dump({"snap": snap, "failed": failed, "rdeps": rdeps, "noisy": sorted(noisy or ()),
+                      "aliases": aliases}, fh)
     return sum(len(v) for v in snap.values()), failed
 
 

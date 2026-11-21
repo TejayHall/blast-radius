@@ -211,6 +211,10 @@ def main():
     if want:
         from . import diffimport, importtime
         keys = importtime.Keys(ix)
+        try:
+            keys.aliases = diffimport._load_base().get("aliases", {}) or {}
+        except Exception:  # noqa: BLE001
+            keys.aliases = {}
         files = [dict(p.ca.files) for p, _ in want]
         res = diffimport.run_diffs(ROOT, files, parallel=2, deadline=t0 + wall_budget * 0.6)
         for (p, fb), (r, cpu) in zip(want, res):
