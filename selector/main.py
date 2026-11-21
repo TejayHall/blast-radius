@@ -219,7 +219,12 @@ def main():
                 p.ca.notes.append(f"diff failed (cpu {cpu:.2f}s): fallback {len(fb)}")
                 continue
             patched = [m for m in (diffimport.path_to_module(fp) for fp in p.ca.files) if m]
-            c = importtime.candidates_from_diff(r, ix, keys, an, ROOT, p.ca.notes, patched)
+            idents = {}
+            for fp, ids in p.ca.changed_idents.items():
+                m = diffimport.path_to_module(fp)
+                if m:
+                    idents.setdefault(m, set()).update(ids)
+            c = importtime.candidates_from_diff(r, ix, keys, an, ROOT, p.ca.notes, patched, idents)
             cn = {idx_to_num[i] for i in c if idx_to_num[i] is not None}
             p.cand |= cn
             p.ca.notes.append(f"diff cpu {cpu:.2f}s: {len(r.get('changes', []))} changes, "
@@ -258,9 +263,10 @@ def main():
             return (c * sc + 0.01 if sc is not None else c), key
 
         V, X = set(), set()
+        force_x = {idx_to_num[i] for i in p.ca.force_x if idx_to_num[i] is not None}
         for n in p.cand:
             c, _ = cost_of(n)
-            if (id_of_num[n] in SUBPROCESS_TESTS or c > max(1.0, 1.25 * dur[n] / 1000.0)
+            if (id_of_num[n] in SUBPROCESS_TESTS or n in force_x or c > max(1.0, 1.25 * dur[n] / 1000.0)
                     or (dur[n] >= GIANT_MS and c > 3.0)):
                 X.add(n)
             else:

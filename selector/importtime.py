@@ -109,9 +109,14 @@ def _find_def(tree, qual):
 V1_MAPPING = os.environ.get("BR_V1_MAPPING", "0") == "1"  # diagnostics: v1's broader mapping
 
 
-def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=()):
+_ENUM_MEMBER_ATTRS = ("_member_map_", "_member_names_", "_value2member_map_", "_hashable_values_",
+                      "_unhashable_values_")
+
+
+def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(), changed_idents=None):
     C = set()
     patched_modules = set(patched_modules)
+    enum_done = set()
     for m in sorted(res.get("failed", {})):
         if m.startswith("dialect:"):
             continue
@@ -135,10 +140,22 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(
             if mod not in patched_modules or not tag.startswith("M:"):
                 continue
             name = tag.rsplit(":", 1)[1]
+            if changed_idents is not None and name not in changed_idents.get(mod, ()):
+                continue  # the patch never names it: a lazily cached attribute, not an import change
             users = analyzer.runtime_name_users(name)
             c = users & ix.file_any(path)
             notes.append(f"diff: imported name {tag} changed -> name users {len(users)} in importers = {len(c)}")
             C |= c
+            continue
+        if tag.startswith("C:") and tag.rsplit(":", 1)[1] in _ENUM_MEMBER_ATTRS:
+            # members of an Enum added or removed: iterating the enum reads every member through
+            # _member_map_ one key at a time, so any reader of the member table may see the change
+            cls_tag = tag.rsplit(":", 1)[0]
+            if cls_tag not in enum_done:
+                enum_done.add(cls_tag)
+                c = keys.any_access(cls_tag + ":_member_map_") | keys.any_access(cls_tag + ":_value2member_map_")
+                notes.append(f"diff: enum {cls_tag[2:]} members changed -> member-table readers {len(c)}")
+                C |= c
             continue
         if tag.startswith("K:"):
             c = ix.file_any(path)

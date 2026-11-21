@@ -47,6 +47,8 @@ class CommitAnalysis:
         self.needs_diff = False   # differential import would sharpen the candidate set
         self.fn_spans = []        # (path, a, b) of changed function-body statements (old coordinates)
         self.diff_fallback = set()  # sound candidates to add if no differential import is run
+        self.force_x = set()      # candidates that must never be released by local verification
+        self.changed_idents = {}  # relpath -> identifiers on added/removed lines of its diff
 
 
 def _read(root, rel):
@@ -177,12 +179,15 @@ class Analyzer:
     def _analyze_file(self, ca, fd):
         ix = self.ix
         path = fd.path
-        # Local verification serves patched contents through an import hook and open() redirects. Added,
-        # deleted or renamed files (directory listings, module discovery) and files outside the package and
-        # its tests cannot be reproduced faithfully that way: such commits are never verified.
-        if (fd.is_new or fd.is_deleted or fd.rename or fd.binary
-                or not (path.startswith(("sqlglot/", "tests/")))):
+        # Local verification serves patched contents through an import hook and open() redirects (added and
+        # deleted modules included). Only explicit directory listings cannot be reproduced: their tests are
+        # pinned as never verified (force_x). Binary patches and files outside the package and its tests are
+        # not verified at all.
+        if fd.binary or not (path.startswith(("sqlglot/", "tests/"))):
             ca.verifiable = False
+        if fd.is_new or fd.is_deleted or fd.rename:
+            for d in {os.path.dirname(path), os.path.dirname(fd.old_path or path)}:
+                ca.force_x |= self._listers(d)
         if _touches_pytest_config(self.root, fd):
             # test-runner configuration (conftest, pytest options) can change every test's outcome
             ca.kinds.add("fallback")
@@ -193,7 +198,7 @@ class Analyzer:
             ca.verifiable = False
             ca.kinds.add("other")
             ca.cand |= ix.readers(path) | ix.readers(fd.old_path or path)
-            ca.cand |= ix.listers(os.path.dirname(path))
+            ca.cand |= self._listers(os.path.dirname(path))
             if path.endswith(".py"):
                 ca.cand |= ix.file_any(path)
             ca.notes.append(f"{path}: binary")
@@ -225,6 +230,13 @@ class Analyzer:
         if fd.rename and old_rel != path:
             ca.files[old_rel] = None
         ca.files[path] = new
+        idents = set()
+        for h in fd.hunks:
+            for line in h[4]:
+                if line[:1] in "+-":
+                    idents.update(_IDENT_RE.findall(line[1:]))
+        for rp in {path, old_rel}:
+            ca.changed_idents.setdefault(rp, set()).update(idents)
         if path.endswith(".py") or old_rel.endswith(".py"):
             self._analyze_py(ca, fd, old_rel, path, old, new)
         else:
@@ -235,14 +247,19 @@ class Analyzer:
         ix = self.ix
         in_pkg = path.startswith(("sqlglot/", "tests/")) or old_rel.startswith(("sqlglot/", "tests/"))
         if fd.is_new and not old:
-            # a brand-new module only matters if something imports or lists it
-            c = ix.listers(os.path.dirname(path))
+            # a brand-new module only matters if something imports it (another changed file: analysed on its
+            # own) or lists its directory. A new test module is imported by pytest's collection next to every
+            # other test: top-level code beyond imports and definitions could touch shared state.
+            c = self._listers(os.path.dirname(path))
             ca.kinds.add("py_new")
+            if path.startswith("tests/") and not _definitions_only(new):
+                c = ix.all_tests()
+                ca.notes.append(f"{path}: new test module with top-level code -> all tests")
             ca.cand |= c
             ca.notes.append(f"{path}: new python file, listers {len(c)}")
             return
         if new is None or (fd.rename and old_rel != path):
-            c = ix.file_any(old_rel) | ix.listers(os.path.dirname(old_rel)) | ix.readers(old_rel)
+            c = ix.file_any(old_rel) | self._listers(os.path.dirname(old_rel)) | ix.readers(old_rel)
             ca.kinds.add("py_top")
             ca.import_time = True
             ca.cand |= c
@@ -430,6 +447,42 @@ class Analyzer:
             return False
         return ast.dump(so, include_attributes=False) == ast.dump(sn, include_attributes=False)
 
+    _LIST_RE = re.compile(r"os\.listdir|os\.scandir|os\.walk|glob\.|\.iterdir\(|\.rglob\(|\.glob\(|pkgutil\.|"
+                          r"iter_modules|walk_packages|importlib\.resources|resources\.files")
+
+    def explicit_listers(self):
+        """Tests that run an explicit directory listing (as opposed to the import system scanning package
+        directories, which every importing test does)."""
+        key = ("explicit_listers",)
+        r = self._src_cache.get(key)
+        if r is None:
+            r = set()
+            files = list(self._py_sources())
+            base = os.path.join(self.root, "sqlglotc")
+            for dp, _, fns in os.walk(base):
+                for fn in fns:
+                    if fn.endswith(".py"):
+                        files.append(os.path.relpath(os.path.join(dp, fn), self.root).replace(os.sep, "/"))
+            for rel in files:
+                try:
+                    txt = self._text(rel)
+                except OSError:
+                    continue
+                if not self._LIST_RE.search(txt):
+                    continue
+                for i, line in enumerate(txt.split("\n"), 1):
+                    if self._LIST_RE.search(line):
+                        r |= self.ix.fn_tests(rel, i, i) | self.ix.fnr_tests(rel, i, i) | self.ix.top_tests(rel, i, i)
+            self._src_cache[key] = r
+        return r
+
+    def _listers(self, dirpath):
+        """Tests whose outcome can depend on the file list of `dirpath`."""
+        c = self.ix.listers(dirpath)
+        if dirpath.startswith(("sqlglot", "tests")) and os.path.exists(os.path.join(self.root, dirpath, "__init__.py")):
+            c = c & self.explicit_listers()
+        return c
+
     def same_name_callers(self, name):
         """Run-time callers of every function or method called `name` in the pinned tree."""
         users = set()
@@ -488,7 +541,7 @@ class Analyzer:
         ix = self.ix
         c = ix.readers(path) | ix.readers(old_rel)
         if fd.is_new or fd.is_deleted or (fd.rename and old_rel != path):
-            c |= ix.listers(os.path.dirname(path)) | ix.listers(os.path.dirname(old_rel))
+            c |= self._listers(os.path.dirname(path)) | self._listers(os.path.dirname(old_rel))
         if c and path.endswith(".sql") and new is not None and old is not None and not fd.is_new:
             if _sql_fixture_equivalent(old, new):
                 ca.kinds.add("fixture_noop")
@@ -499,6 +552,31 @@ class Analyzer:
         ca.kinds.add("fixture" if path.startswith("tests/fixtures/") else "other")
         ca.cand |= c
         ca.notes.append(f"{path}: readers {len(c)}")
+
+
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _definitions_only(src):
+    """True if a module's top level only imports, defines functions/classes, assigns plain values or has a
+    docstring (so importing it cannot touch shared state)."""
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError):
+        return False
+    plain = (ast.Constant, ast.Name, ast.Tuple, ast.List, ast.Dict, ast.Set, ast.Load, ast.Store, ast.Attribute)
+    for st in tree.body:
+        if isinstance(st, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Pass)):
+            continue
+        if isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant):
+            continue
+        if isinstance(st, (ast.Assign, ast.AnnAssign)) and st.value is not None and all(
+                isinstance(n, plain) for n in ast.walk(st.value)):
+            continue
+        if isinstance(st, ast.If) and isinstance(st.test, ast.Compare) and "__name__" in ast.dump(st.test):
+            continue
+        return False
+    return True
 
 
 def _bound_names(stmt):
