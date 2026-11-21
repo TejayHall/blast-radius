@@ -177,6 +177,12 @@ class Analyzer:
     def _analyze_file(self, ca, fd):
         ix = self.ix
         path = fd.path
+        # Local verification serves patched contents through an import hook and open() redirects. Added,
+        # deleted or renamed files (directory listings, module discovery) and files outside the package and
+        # its tests cannot be reproduced faithfully that way: such commits are never verified.
+        if (fd.is_new or fd.is_deleted or fd.rename or fd.binary
+                or not (path.startswith(("sqlglot/", "tests/")))):
+            ca.verifiable = False
         if fd.binary:
             ca.verifiable = False
             ca.kinds.add("other")

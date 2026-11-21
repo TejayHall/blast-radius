@@ -98,8 +98,9 @@ def _find_def(tree, qual):
     return node
 
 
-def candidates_from_diff(res, ix, keys, analyzer, root, notes):
+def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=()):
     C = set()
+    patched_modules = set(patched_modules)
     for m in sorted(res.get("failed", {})):
         if m.startswith("dialect:"):
             continue
@@ -111,9 +112,21 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes):
         notes.append(f"diff: {m} fails to import -> {len(c)} importers")
         C |= c
     for mod, tag, key, typ in res.get("changes", []):
-        if typ in ("ref", "function_code"):
+        if typ == "function_code":
             continue
         path = module_to_path(root, mod)
+        if typ == "ref":
+            # a global that refers to an object defined elsewhere (an import) was added, removed or
+            # re-pointed. Only meaningful in a module the patch edits (elsewhere it is lazy-attribute
+            # noise): every run-time use of that name may now hit a NameError or a different object.
+            if mod not in patched_modules or not tag.startswith("M:"):
+                continue
+            name = tag.rsplit(":", 1)[1]
+            users = analyzer.runtime_name_users(name)
+            c = users & ix.file_any(path)
+            notes.append(f"diff: imported name {tag} changed -> name users {len(users)} in importers = {len(c)}")
+            C |= c
+            continue
         if tag.startswith("K:"):
             c = ix.file_any(path)
             notes.append(f"diff: class {tag[2:]} bases changed -> {len(c)}")

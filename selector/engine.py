@@ -179,6 +179,13 @@ def _install_overlay(root, files, tmpdir):
 
     builtins.open = patched_open
     io.open = patched_open
+    real_open_code = io.open_code
+
+    def patched_open_code(path):
+        # runpy.run_path and friends read sources through io.open_code
+        return real_open_code(_map(path))
+
+    io.open_code = patched_open_code
     real_exists = os.path.exists
     real_isfile = os.path.isfile
 
@@ -221,8 +228,25 @@ TIMES = {}
 _STATE = {"failed": False, "stop_after_fail": False}
 
 
+PYTEST_DEPTH = 40  # stack depth of a test body under pytest-xdist (37 measured) plus a margin
+
+
+def _emulate_pytest_stack():
+    """Labels come from pytest, whose machinery puts each test ~30 frames deeper than ours. A change that
+    pushes recursion near the limit raises RecursionError there first: lower our limit by the deficit."""
+    f = sys._getframe()
+    d = 0
+    while f is not None:
+        d += 1
+        f = f.f_back
+    deficit = PYTEST_DEPTH - (d + 5)  # unittest adds ~5 frames between here and the test method
+    if deficit > 0:
+        sys.setrecursionlimit(max(100, sys.getrecursionlimit() - deficit))
+
+
 def _run_tests(test_ids, per_test_timeout, budget_deadline):
     """Run tests grouped by class. Returns {test_id: 'pass'|'fail'|'timeout'|'skip'|'unknown'}."""
+    _emulate_pytest_stack()
     concurrent.futures.ProcessPoolExecutor = _InlineExecutor
     import unittest.case as _uc
 

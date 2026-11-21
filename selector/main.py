@@ -47,7 +47,7 @@ CLASS_LOADED_FIXTURES = {
 }
 # Giant tests (>= 9 s): "drop" = release on clean cheap evidence, "probe" = also require a passing probe of
 # test_execute_tpcds on a few queries, "keep" = always include.
-GIANT_MODE = os.environ.get("BR_GIANT_MODE", "drop")
+GIANT_MODE = os.environ.get("BR_GIANT_MODE", "keep")
 DROP_GIANTS = GIANT_MODE == "drop"
 P_NONE_CODE = 0.5        # prior: no candidate fails (sample: 8 of 15 code commits with candidates)
 P_NONE_DATA = 0.05
@@ -187,7 +187,8 @@ def main():
                 p.cand |= fb
                 p.ca.notes.append(f"diff failed (cpu {cpu:.2f}s): fallback {len(fb)}")
                 continue
-            c = importtime.candidates_from_diff(r, ix, keys, an, ROOT, p.ca.notes)
+            patched = [m for m in (diffimport.path_to_module(fp) for fp in p.ca.files) if m]
+            c = importtime.candidates_from_diff(r, ix, keys, an, ROOT, p.ca.notes, patched)
             cn = {idx_to_num[i] for i in c if idx_to_num[i] is not None}
             p.cand |= cn
             p.ca.notes.append(f"diff cpu {cpu:.2f}s: {len(r.get('changes', []))} changes, "

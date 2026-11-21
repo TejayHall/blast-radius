@@ -209,9 +209,13 @@ def import_all(root_pkg="sqlglot"):
     return failed
 
 
+_MODULE_DUNDERS_SKIP = {"__name__", "__file__", "__spec__", "__loader__", "__builtins__", "__cached__",
+                        "__package__", "__path__", "__doc__", "__annotations__", "__annotate__"}
+
+
 def _entries(mod, name, fpr, out):
     for k, v in list(vars(mod).items()):
-        if k.startswith("__") and k.endswith("__"):
+        if k in _MODULE_DUNDERS_SKIP:
             continue
         if isinstance(v, types.ModuleType):
             continue
