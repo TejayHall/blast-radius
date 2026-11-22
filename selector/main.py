@@ -447,7 +447,7 @@ def main():
                 # saving is expected only when it passes
                 if P_GIANT_PASS * gain_ms / 1000.0 > 1.2 * (c + setup.get(key, 0.0)) + 0.5:
                     p.after_fail.add(n)
-                    per[id_of_num[n]] = max(2.0, 2.0 * c + 1.0)  # estimates run high: 2x is ample
+                    per[id_of_num[n]] = max(2.0, 5.0 * c + 1.0)
                     p.est += c + setup.get(key, 0.0)  # the job's time budget derives from est
             # merge case filters per fixture; only when every reader of that fixture in this job is filtered
             vids = {id_of_num[n] for n in p.V | p.after_fail}
