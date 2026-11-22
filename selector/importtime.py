@@ -117,7 +117,7 @@ V1_FUNC = V1_MAPPING or os.environ.get("BR_V1_FUNC", "0") == "1"   # code-only f
 NO_SUBS = V1_MAPPING or os.environ.get("BR_NO_SUBS", "1") == "1"   # no instance narrowing of class attributes
 # bisection: v1's callers mapping only for functions whose body runs at import time ("fni") / only for the rest
 V1_FNI = os.environ.get("BR_V1_FNI", "0") == "1"
-V1_NONFNI = os.environ.get("BR_V1_NONFNI", "0") == "1"
+V1_NONFNI = os.environ.get("BR_V1_NONFNI", "1") == "1"
 
 
 _ENUM_MEMBER_ATTRS = ("_member_map_", "_member_names_", "_value2member_map_", "_hashable_values_",
