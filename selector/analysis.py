@@ -451,9 +451,6 @@ class Analyzer:
             na, nb = reg["na"], reg["nb"]
         else:
             na, nb = reg["na"] - 1, reg["na"]
-        # a reformatting keeps the number of statements that start in the region
-        if _stmts_in(tree, oa, ob) != _stmts_in(new_tree, na, nb):
-            return False
         lo = locate(tree, oa, ob)
         ln = locate(new_tree, max(1, na), max(1, nb))
         so, sn = lo.stmt, ln.stmt
@@ -461,7 +458,10 @@ class Analyzer:
             return False
         if (so.end_lineno - so.lineno) > 400:
             return False
-        return ast.dump(so, include_attributes=False) == ast.dump(sn, include_attributes=False)
+        if ast.dump(so, include_attributes=False) != ast.dump(sn, include_attributes=False):
+            return False
+        # equal innermost statements: a reformatting also keeps the number of statements in the region
+        return _stmts_in(tree, oa, ob) == _stmts_in(new_tree, na, nb)
 
     _LIST_RE = re.compile(r"os\.listdir|os\.scandir|os\.walk|glob\.|\.iterdir\(|\.rglob\(|\.glob\(|pkgutil\.|"
                           r"iter_modules|walk_packages|importlib\.resources|resources\.files")
