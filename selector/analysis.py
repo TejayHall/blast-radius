@@ -438,6 +438,10 @@ class Analyzer:
             else:
                 inside = any(s0 < ln <= e0 for s0, e0 in spans for ln in range(reg["a"], reg["b"] + 1))
             return not inside
+        # Code lines added or removed outright are never a no-op: comparing an inserted (or deleted) statement
+        # with its neighbour proves nothing when they are identical (a duplicated `self._advance()`).
+        if reg["kind"] == "ins" or not reg["add"] or not reg["rem"]:
+            return False
         # compare the innermost enclosing statements
         if reg["kind"] == "ins":
             oa, ob = reg["a"], reg["a"] + 1
@@ -447,6 +451,9 @@ class Analyzer:
             na, nb = reg["na"], reg["nb"]
         else:
             na, nb = reg["na"] - 1, reg["na"]
+        # a reformatting keeps the number of statements that start in the region
+        if _stmts_in(tree, oa, ob) != _stmts_in(new_tree, na, nb):
+            return False
         lo = locate(tree, oa, ob)
         ln = locate(new_tree, max(1, na), max(1, nb))
         so, sn = lo.stmt, ln.stmt
@@ -564,6 +571,23 @@ class Analyzer:
 
 
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+_STMT_LINES = {}
+
+
+def _stmts_in(tree, a, b):
+    """Number of statements starting on lines a..b (statement start lines cached per tree)."""
+    import bisect
+
+    ent = _STMT_LINES.get(id(tree))
+    if ent is None or ent[0] is not tree:
+        if len(_STMT_LINES) > 64:
+            _STMT_LINES.clear()
+        ent = (tree, sorted(n.lineno for n in ast.walk(tree) if isinstance(n, ast.stmt)))
+        _STMT_LINES[id(tree)] = ent
+    lines = ent[1]
+    return bisect.bisect_right(lines, b) - bisect.bisect_left(lines, a)
 
 
 def _definitions_only(src):

@@ -140,11 +140,15 @@ def _child(root, files, w, tmpdir):
                     failed[m] = repr(e)
         snap = F.snapshot(only=affected, noisy=set(base.get("noisy", ())))
         changes = []
+        removed = []
         for m in sorted(affected):
             if m in failed:
                 continue
-            for tag, key, typ in F.diff(base["snap"].get(m, {}), snap.get(m, {})):
+            bm, pm = base["snap"].get(m, {}), snap.get(m, {})
+            for tag, key, typ in F.diff(bm, pm):
                 changes.append((m, tag, key, typ))
+            # module-level names that no longer exist: `from m import name` now fails wherever it runs
+            removed.extend(t for t in bm if t.startswith("M:") and t not in pm)
         new_failed = {m: e for m, e in failed.items() if m not in base["failed"]}
         subs = {}
         for _m, tag, _k, _t in changes:
@@ -177,7 +181,7 @@ def _child(root, files, w, tmpdir):
                 subs[qual] = sorted(seen)
         lazy_changed = "lazy" in base and lazy != base["lazy"]
         data = json.dumps({"changes": changes, "failed": new_failed, "subclasses": subs,
-                           "lazy_changed": lazy_changed}).encode()
+                           "lazy_changed": lazy_changed, "removed": removed}).encode()
         view = memoryview(data)
         while view:
             n = os.write(w, view)

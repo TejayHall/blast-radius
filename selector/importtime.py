@@ -150,9 +150,34 @@ def _body_edited(fn_spans, path, node):
     return any(p == path and a <= b1 and b >= b0 for p, a, b in fn_spans)
 
 
+_TEST_IMPORTS = [None]
+
+
+def _test_imports():
+    """{"module:name": [test files importing it at module level, transitively]} (tools/build_test_imports.py)."""
+    if _TEST_IMPORTS[0] is None:
+        try:
+            with open(os.path.join(DATA, "test_imports.json"), encoding="utf-8") as fh:
+                _TEST_IMPORTS[0] = json.load(fh)
+        except (OSError, ValueError):
+            _TEST_IMPORTS[0] = {}
+    return _TEST_IMPORTS[0]
+
+
 def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(), changed_idents=None,
                          fn_spans=None):
     C = set()
+    gone = res.get("removed") or []
+    if gone:
+        ti = _test_imports()
+        files = set()
+        for tag in gone:
+            _, mod_, name_ = tag.split(":", 2)
+            files.update(ti.get(f"{mod_}:{name_}", ()))
+        if files:
+            c = {i for i, tid in enumerate(ix.ids) if tid.split("::", 1)[0] in files}
+            notes.append(f"diff: removed names imported by {len(files)} test files at import -> {len(c)}")
+            C |= c
     patched_modules = set(patched_modules)
     enum_done = set()
     for m in sorted(res.get("failed", {})):
