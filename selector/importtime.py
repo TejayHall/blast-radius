@@ -111,6 +111,8 @@ def _find_def(tree, qual):
 
 
 V1_MAPPING = os.environ.get("BR_V1_MAPPING", "0") == "1"  # diagnostics: v1's broader mapping
+V1_FUNC = V1_MAPPING or os.environ.get("BR_V1_FUNC", "0") == "1"   # code-only function changes -> callers
+NO_SUBS = V1_MAPPING or os.environ.get("BR_NO_SUBS", "0") == "1"   # no instance narrowing of class attributes
 
 
 _ENUM_MEMBER_ATTRS = ("_member_map_", "_member_names_", "_value2member_map_", "_hashable_values_",
@@ -155,7 +157,7 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(
             # a body edit: line coverage of the edited statements already selected its callers - provided the
             # function has a definition in the source. Generated ones (dataclass __init__/__eq__, exec-built)
             # change with class-level edits that no line coverage sees: every importer of the module.
-            if not V1_MAPPING:
+            if not V1_FUNC:
                 kind_, rest_ = tag.split(":", 1)
                 qual_, attr_ = rest_.rsplit(":", 1)
                 cq = qual_[len(mod) + 1:] if (kind_ == "C" and qual_.startswith(mod + ".")) else ""
@@ -248,7 +250,7 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(
         imp = ix.file_any(path)
         c = users & imp
         subs = res.get("subclasses", {}).get(qual)
-        if subs and kind == "C" and not V1_MAPPING:
+        if subs and kind == "C" and not NO_SUBS:
             # an Expression class attribute is read through instances of the class (or a subclass), by
             # code naming the class, or by generic walks over the class registries
             near = set()
