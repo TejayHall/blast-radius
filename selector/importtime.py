@@ -142,7 +142,16 @@ def _class_users(analyzer, ix, keys, path, qual, res):
     return c if c else imp
 
 
-def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(), changed_idents=None):
+def _body_edited(fn_spans, path, node):
+    """True if a function-body region of the patch (line coverage maps those) lies inside node's body."""
+    if fn_spans is None:
+        return True  # unknown: trust line coverage, as before
+    b0, b1 = node.body[0].lineno, node.end_lineno
+    return any(p == path and a <= b1 and b >= b0 for p, a, b in fn_spans)
+
+
+def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(), changed_idents=None,
+                         fn_spans=None):
     C = set()
     patched_modules = set(patched_modules)
     enum_done = set()
@@ -181,9 +190,15 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(
                 found = node_ is not None
                 if found:
                     fni_ = bool(getattr(node_, "body", None)) and ix.runs_at_import(path, node_.body[0].lineno, node_.end_lineno)
-                    if not ((V1_FNI and fni_) or (V1_NONFNI and not fni_)):
+                    if V1_FNI and fni_ or V1_NONFNI and not fni_:
+                        notes.append(f"diff: bisect v1 callers for {tag} (fni={fni_})")
+                    elif getattr(node_, "body", None) and not _body_edited(fn_spans, path, node_):
+                        # its code changed although the patch edits none of its body statements: a header edit
+                        # (decorator, parameters) or compile context (module-level import bindings change how
+                        # `name.attr(...)` compiles). No line coverage selected its callers: do it here.
+                        notes.append(f"diff: code of {tag} changed outside its body -> callers")
+                    else:
                         continue
-                    notes.append(f"diff: bisect v1 callers for {tag} (fni={fni_})")
                 else:
                     c = _class_users(analyzer, ix, keys, path, qual_ if kind_ == "C" else "", res)
                     notes.append(f"diff: generated function {tag} changed -> class users {len(c)}")

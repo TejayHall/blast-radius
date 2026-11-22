@@ -229,7 +229,8 @@ def main():
                     m = diffimport.path_to_module(fp)
                     if m:
                         idents.setdefault(m, set()).update(ids)
-                c = importtime.candidates_from_diff(r, ix, keys, an, ROOT, p.ca.notes, patched, idents)
+                c = importtime.candidates_from_diff(r, ix, keys, an, ROOT, p.ca.notes, patched, idents,
+                                                    fn_spans=list(p.ca.fn_spans))
             except Exception as e:  # noqa: BLE001  never lose a commit to a mapping bug: fall back
                 p.cand |= fb
                 p.ca.notes.append(f"diff mapping error {e!r}: fallback {len(fb)}")
