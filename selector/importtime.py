@@ -115,6 +115,9 @@ def _find_def(tree, qual):
 V1_MAPPING = os.environ.get("BR_V1_MAPPING", "0") == "1"
 V1_FUNC = V1_MAPPING or os.environ.get("BR_V1_FUNC", "0") == "1"   # code-only function changes -> callers
 NO_SUBS = V1_MAPPING or os.environ.get("BR_NO_SUBS", "1") == "1"   # no instance narrowing of class attributes
+# bisection: v1's callers mapping only for functions whose body runs at import time ("fni") / only for the rest
+V1_FNI = os.environ.get("BR_V1_FNI", "0") == "1"
+V1_NONFNI = os.environ.get("BR_V1_NONFNI", "0") == "1"
 
 
 _ENUM_MEMBER_ATTRS = ("_member_map_", "_member_names_", "_value2member_map_", "_hashable_values_",
@@ -172,15 +175,20 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(
                 qual_, attr_ = rest_.rsplit(":", 1)
                 cq = qual_[len(mod) + 1:] if (kind_ == "C" and qual_.startswith(mod + ".")) else ""
                 try:
-                    found = _find_def(analyzer._tree(path), f"{cq}.{attr_}" if cq else attr_) is not None
+                    node_ = _find_def(analyzer._tree(path), f"{cq}.{attr_}" if cq else attr_)
                 except (SyntaxError, OSError, ValueError):
-                    found = False
+                    node_ = None
+                found = node_ is not None
                 if found:
+                    fni_ = bool(getattr(node_, "body", None)) and ix.runs_at_import(path, node_.body[0].lineno, node_.end_lineno)
+                    if not ((V1_FNI and fni_) or (V1_NONFNI and not fni_)):
+                        continue
+                    notes.append(f"diff: bisect v1 callers for {tag} (fni={fni_})")
+                else:
+                    c = _class_users(analyzer, ix, keys, path, qual_ if kind_ == "C" else "", res)
+                    notes.append(f"diff: generated function {tag} changed -> class users {len(c)}")
+                    C |= c
                     continue
-                c = _class_users(analyzer, ix, keys, path, qual_ if kind_ == "C" else "", res)
-                notes.append(f"diff: generated function {tag} changed -> class users {len(c)}")
-                C |= c
-                continue
             typ = "function"
         if typ == "ref":
             # a global that refers to an object defined elsewhere (an import) was added, removed or
