@@ -275,12 +275,62 @@ def _run_tests(test_ids, per_test_timeout, budget_deadline):
     _run_groups(main_ids, out, per_test_timeout, budget_deadline)
     if late_ids:
         if _STATE["failed"]:
-            _run_groups(late_ids, out, per_test_timeout, budget_deadline)
+            _run_groups([t for t in late_ids if not t.startswith("@probe::")], out, per_test_timeout, budget_deadline)
+            for t in late_ids:
+                if t.startswith("@probe::"):
+                    out[t] = _run_probe(t, budget_deadline)
         else:
             for tid in late_ids:
                 out[tid] = "unknown"
     signal.setitimer(signal.ITIMER_REAL, 0)
     return out
+
+
+MAXN_PROBE_LIMIT = 0.75  # CPU seconds; the probe takes ~0.2 s on the pinned tree
+
+
+def _probe_max_nodes():
+    """tests/test_parser.py::test_max_nodes (28.8 s) at a small scale: the same assertions on a 60-column
+    instead of a 10000-column query, with proportionally lower node limits. Returns 'pass' or 'fail'."""
+    from sqlglot import exp, parse_one
+    from sqlglot.errors import ParseError
+
+    t0 = time.process_time()
+    if not isinstance(parse_one("SELECT 1", max_nodes=1_000_000), exp.Select):
+        return "fail"
+    cols = [f"col{i}" for i in range(500)]
+    if not isinstance(parse_one(f"SELECT {','.join(cols)} FROM t", max_nodes=1_000_000), exp.Select):
+        return "fail"
+    sql = "SELECT " + ",".join("x" + "=x" * 100 for _ in range(60))
+    for limit, needle in ((5000, "Maximum number of AST nodes"), (500, "(500)")):
+        try:
+            parse_one(sql, max_nodes=limit)
+            return "fail"
+        except ParseError as e:
+            if needle not in str(e):
+                return "fail"
+    try:
+        parse_one("SELECT " + ",".join(f"x={i}" for i in range(100)), max_nodes=5)
+        return "fail"
+    except ParseError:
+        pass
+    if not isinstance(parse_one("SELECT 1, 2, 3"), exp.Select):
+        return "fail"
+    # a change that slows parsing down could make the real test time out: only a normal-speed run counts
+    return "pass" if time.process_time() - t0 <= MAXN_PROBE_LIMIT else "fail"
+
+
+def _run_probe(probe_id, budget_deadline):
+    fn = {"@probe::max_nodes": _probe_max_nodes}.get(probe_id)
+    if fn is None or time.monotonic() > budget_deadline:
+        return "unknown"
+    signal.setitimer(signal.ITIMER_REAL, max(0.1, min(5.0, budget_deadline - time.monotonic())))
+    try:
+        return fn()
+    except BaseException:  # noqa: BLE001  any error (incl. the alarm) means the real test may fail
+        return "fail"
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
 
 
 def _run_groups(test_ids, out, per_test_timeout, budget_deadline):

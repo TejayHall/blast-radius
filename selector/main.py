@@ -460,6 +460,14 @@ def main():
             if case_filters:
                 p.ca.notes.append(f"case filters: " + ", ".join(f"{fx}:{len(v)}" for fx, v in case_filters.items()))
             af_ids = [id_of_num[n] for n in sorted(p.after_fail)]
+            # test_max_nodes (28.8 s, never verified) only fails when parsing itself is broken: after a failure a
+            # scaled-down probe of the same assertions decides whether it stays
+            p.maxn_probe = False
+            mn = num_of_id.get(MAXN_TEST)
+            if mn is not None and mn in set(p.cand) - set(p.V) and mn in kept_on_fail:
+                if (base_ms - best_schedule(kept_on_fail - {mn}, dur)[0]) / 1000.0 > 1.0:
+                    p.maxn_probe = True
+                    af_ids.append("@probe::max_nodes")
             if af_ids:
                 p.ca.notes.append(f"after-failure giants: {af_ids}")
             jobs.append((p, ids + af_ids, per, {"always": always, "stop_after_fail": True, "case_filters": case_filters,
@@ -505,6 +513,10 @@ def main():
                         keep.add(pn)  # the giant stays unless its probe passed on clean evidence
                     else:
                         p.ca.notes.append(f"giant {pn} released: probe on {len(p.probe[1])} queries passed")
+                if getattr(p, "maxn_probe", False) and p.verified.get("@probe::max_nodes") == "pass":
+                    mn = num_of_id.get(MAXN_TEST)
+                    if mn is not None:
+                        af_pass.add(mn)
                 unverified = p.cand - p.V - af_pass
                 if af_pass:
                     p.ca.notes.append(f"giants released after the failure: {sorted(af_pass)} passed")
