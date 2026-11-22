@@ -159,6 +159,7 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(
     lazy_done = set()
     for mod, tag, key, typ in res.get("changes", []):
         path = module_to_path(root, mod)
+        bisect_part = None
         if typ != "ref" and tag.startswith("M:") and mod not in lazy_done and getattr(ix, "tfi", {}).get(path):
             # module state of a package whose lazy loader test files run while they are imported
             # (`from sqlglot.dialects import DuckDB`): those imports read it outside any key trace
@@ -184,6 +185,7 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(
                     if not ((V1_FNI and fni_) or (V1_NONFNI and not fni_)):
                         continue
                     notes.append(f"diff: bisect v1 callers for {tag} (fni={fni_})")
+                    bisect_part = "fnr"
                 else:
                     c = _class_users(analyzer, ix, keys, path, qual_ if kind_ == "C" else "", res)
                     notes.append(f"diff: generated function {tag} changed -> class users {len(c)}")
@@ -243,7 +245,12 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(
             except (SyntaxError, OSError):
                 node = None
             if node is not None and getattr(node, "body", None):
-                c = ix.fnr_tests(path, node.body[0].lineno, node.end_lineno) | ix.fn_tests(path, node.lineno, node.lineno)
+                if bisect_part == "fnr":
+                    c = ix.fnr_tests(path, node.body[0].lineno, node.end_lineno)
+                elif bisect_part == "fn":
+                    c = ix.fn_tests(path, node.lineno, node.lineno)
+                else:
+                    c = ix.fnr_tests(path, node.body[0].lineno, node.end_lineno) | ix.fn_tests(path, node.lineno, node.lineno)
                 notes.append(f"diff: function {full} -> callers {len(c)}")
                 C |= c
                 continue
