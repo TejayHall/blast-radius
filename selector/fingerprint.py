@@ -341,9 +341,18 @@ def module_deps(prefix="sqlglot"):
         if mod is None or not (name == prefix or name.startswith(prefix + ".")):
             continue
         d = set()
-        for v in list(vars(mod).values()):
+        ns = vars(mod)
+        # A lazy loader's namespace (module-level __getattr__) only caches references to what it hands out, and a
+        # package's own submodule attributes are set by the import system: references are fingerprinted by
+        # name, so neither makes this module's state depend on the referenced module's content (static
+        # imports below still do). Without this every leaf dialect "affects" the whole package.
+        lazy = callable(ns.get("__getattr__"))
+        for k, v in list(ns.items()):
             if isinstance(v, types.ModuleType):
-                d.add(v.__name__)
+                if v.__name__ != f"{name}.{k}":
+                    d.add(v.__name__)
+                continue
+            if lazy:
                 continue
             m = getattr(v, "__module__", None)
             if isinstance(m, str):

@@ -316,6 +316,11 @@ class Analyzer:
                     # the function also runs while modules import (factories, metaclasses): its run-time
                     # callers are certain; import-time effects come from the differential import
                     rt = ix.fnr_tests(path, *span)
+                    # ... and test files that run it while being imported (state the diff cannot see)
+                    ti = ix.test_import_tests(path, *span)
+                    if ti:
+                        rt |= ti
+                        ca.notes.append(f"{path}:{a}-{b} runs during test-file import -> +{len(ti)}")
                     ca.cand |= rt
                     ca.diff_fallback |= c
                     ca.needs_diff = True

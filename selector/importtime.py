@@ -153,8 +153,16 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(
         c = ix.file_any(path)
         notes.append(f"diff: {m} fails to import -> {len(c)} importers")
         C |= c
+    lazy_done = set()
     for mod, tag, key, typ in res.get("changes", []):
         path = module_to_path(root, mod)
+        if typ != "ref" and tag.startswith("M:") and mod not in lazy_done and getattr(ix, "tfi", {}).get(path):
+            # module state of a package whose lazy loader test files run while they are imported
+            # (`from sqlglot.dialects import DuckDB`): those imports read it outside any key trace
+            lazy_done.add(mod)
+            c = ix.test_import_tests(path, 1, 1 << 30)
+            notes.append(f"diff: {mod} state read by test-file imports -> {len(c)}")
+            C |= c
         if typ == "function_code":
             # a body edit: line coverage of the edited statements already selected its callers - provided the
             # function has a definition in the source. Generated ones (dataclass __init__/__eq__, exec-built)

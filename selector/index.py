@@ -65,6 +65,14 @@ class Index:
                 self.fni = {f: set(ls) for f, ls in json.load(fh).items()}
         except OSError:
             pass
+        # import-time lines that test files run while *they* are imported (module-level subclasses of sqlglot
+        # classes, `from sqlglot.dialects import X` through the lazy loader): {file: {line: [test files]}}
+        self.tfi = {}
+        try:
+            with open(os.path.join(DATA, "test_import_fn.json"), encoding="utf-8") as fh:
+                self.tfi = json.load(fh)
+        except OSError:
+            pass
 
     @property
     def pos(self):
@@ -90,6 +98,21 @@ class Index:
     def runs_at_import(self, path, a, b):
         s = self.fni.get(path)
         return bool(s) and any(a <= ln <= b for ln in s)
+
+    def test_import_tests(self, path, a, b):
+        """Tests of every test file whose import runs a line of path[a..b] (tests/helpers.py: all tests)."""
+        m = self.tfi.get(path)
+        if not m:
+            return set()
+        tfiles = set()
+        for ln, tfs in m.items():
+            if a <= int(ln) <= b:
+                tfiles.update(tfs)
+        if not tfiles:
+            return set()
+        if "tests/helpers.py" in tfiles or "tests/__init__.py" in tfiles:
+            return self.all_tests()
+        return {i for i, tid in enumerate(self.ids) if tid.split("::", 1)[0] in tfiles}
 
     def _lines(self, which, path, a, b):
         fm = self._maps(path)[which]

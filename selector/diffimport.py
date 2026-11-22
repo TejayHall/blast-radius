@@ -52,9 +52,10 @@ def build_snapshot(root="/sqlglot", path=STATE_PATH, noisy=None):
         for m in ds:
             rdeps.setdefault(m, []).append(n)
     aliases = F.container_aliases()
+    order = [m for m in sys.modules if m == "sqlglot" or m.startswith("sqlglot.")]
     with open(path, "wb") as fh:
         marshal.dump({"snap": snap, "failed": failed, "rdeps": rdeps, "noisy": sorted(noisy or ()),
-                      "aliases": aliases, "lazy": lazy}, fh)
+                      "aliases": aliases, "lazy": lazy, "order": order}, fh)
     return sum(len(v) for v in snap.values()), failed
 
 
@@ -128,7 +129,9 @@ def _child(root, files, w, tmpdir):
         except BaseException as e:  # noqa: BLE001
             failed["sqlglot"] = repr(e)
         if not failed:
-            for m in sorted(affected):
+            # the pinned snapshot's import order: registries filled at import (Dialect._classes) keep their order
+            pos = {m: i for i, m in enumerate(base.get("order", ()))}
+            for m in sorted(affected, key=lambda m: (pos.get(m, len(pos)), m)):
                 if m in base["failed"]:
                     continue
                 try:
