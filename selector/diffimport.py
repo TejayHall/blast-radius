@@ -106,6 +106,12 @@ def _load_base():
 
 def _child(root, files, w, tmpdir):
     try:
+        from .engine import prefer_oom_victim
+
+        prefer_oom_victim()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         import gc
 
         gc.freeze()

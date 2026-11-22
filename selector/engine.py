@@ -475,7 +475,18 @@ class _TimedResult(unittest.TestResult):
         return None
 
 
+def prefer_oom_victim():
+    """Children volunteer as the OOM killer's first choice: a change that makes a test allocate without bound
+    must cost that child (its tests stay selected), never the selector itself."""
+    try:
+        with open("/proc/self/oom_score_adj", "w") as fh:
+            fh.write("1000")
+    except OSError:
+        pass
+
+
 def _child_main(root, files, test_ids, per_test_timeout, budget, tmpdir, w, opts=None):
+    prefer_oom_victim()
     try:
         # the selector's own heap (indexes, ASTs) is inherited by fork: freeze it so the cyclic GC
         # (which several tests trigger explicitly) only walks objects created by the tests
