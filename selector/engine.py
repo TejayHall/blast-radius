@@ -286,7 +286,7 @@ def _run_tests(test_ids, per_test_timeout, budget_deadline):
     return out
 
 
-MAXN_PROBE_LIMIT = 0.75  # CPU seconds; the probe takes ~0.2 s on the pinned tree
+MAXN_PROBE_LIMIT = 0.45  # CPU seconds; the probe takes ~0.2 s on the pinned tree (a slower parser keeps the giant)
 
 
 def _probe_max_nodes():
