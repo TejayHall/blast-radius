@@ -31,6 +31,8 @@ SUBPROCESS_TESTS = {"tests/dialects/test_dialect.py::TestDialect::test_lazy_load
 JOB_OVERHEAD = 0.12      # s CPU: fork + fresh sqlglot import + overlay compile (child)
 DIFF_COST = 1.0          # s CPU: one differential import (typical)
 HEAVY_PRELOAD = 0.70     # s CPU once: duckdb/pandas/numpy in the zygote
+COST_CALIB = float(os.environ.get("BR_COST_CALIB", "1.0"))
+P_GIANT_PASS = 0.6  # P(a giant candidate passes | the commit breaks another test), labelled kits
 GIANT_MS = 9000          # tests this long are never verified; they may be dropped on strong evidence
 CHEAP_MS = 900
 MIN_CHEAP_EVIDENCE = 5
@@ -156,6 +158,15 @@ def main():
         f, cls, _ = ix.ids[i].split("::")
         return max(0.002, ix.e[i] - setup.get((f, cls), 0.0)), (f, cls)
 
+    # The recorded local costs come from instrumented runs: jobs that ran to completion used ~0.75-0.83 of the
+    # estimate (62 kit jobs). Calibrate, so the verify/include trade-off is judged on realistic CPU.
+    setup = {k: v * COST_CALIB for k, v in setup.items()}
+    _inc_raw = inc
+
+    def inc(n):  # noqa: F811
+        c, key = _inc_raw(n)
+        return c * COST_CALIB, key
+
     cases_db = [None]
 
     def get_cases():
@@ -259,6 +270,7 @@ def main():
             # fixture-driven tests: with a function-body-only change, only the cases reaching it can differ
             p.filters = {}
             p.cost_scale = {}
+            p.case_tot = {}
             case_ok = (p.ca.fn_spans and not p.ca.import_time
                        and p.ca.kinds <= {"py_fn", "py_noop"})
             if case_ok:
@@ -271,6 +283,7 @@ def main():
                     if flt is not None and ntot:
                         p.filters[tid] = flt
                         p.cost_scale[n] = (nrel + 0.5) / ntot
+                        p.case_tot[n] = ntot
 
             def cost_of(n):
                 c, key = inc(n)
@@ -430,7 +443,9 @@ def main():
                     continue
                 c, key = p.cost_of(n)
                 gain_ms = base_ms - best_schedule(kept_on_fail - {n}, dur)[0]
-                if gain_ms / 1000.0 > 1.2 * (c + setup.get(key, 0.0)) + 0.5:
+                # it runs only in failing commits, where such a giant fails ~40% of the time (labelled kits): the
+                # saving is expected only when it passes
+                if P_GIANT_PASS * gain_ms / 1000.0 > 1.2 * (c + setup.get(key, 0.0)) + 0.5:
                     p.after_fail.add(n)
                     per[id_of_num[n]] = max(2.0, 5.0 * c + 1.0)
                     p.est += c + setup.get(key, 0.0)  # the job's time budget derives from est
@@ -455,8 +470,20 @@ def main():
                         blocked.add(fx)
             case_filters = {fx: sorted(v) for fx, v in merged.items() if fx not in blocked}
             for n in list(p.after_fail):
-                if any(fx not in case_filters for fx in p.filters.get(id_of_num[n], {})):
+                fxs = p.filters.get(id_of_num[n], {})
+                if any(fx not in case_filters for fx in fxs):
                     p.after_fail.discard(n)  # its filter is blocked: it would run in full
+                    continue
+                # the fixture filter is shared by every test of the job that reads it: re-check the giant's cost
+                # with the merged case count
+                tot = p.case_tot.get(n)
+                if fxs and tot:
+                    nrel = max(len(case_filters[fx]) for fx in fxs)
+                    c_raw, key = inc(n)
+                    c_eff = c_raw * (nrel + 0.5) / tot + 0.01
+                    gain_ms = base_ms - best_schedule(kept_on_fail - {n}, dur)[0]
+                    if P_GIANT_PASS * gain_ms / 1000.0 <= 1.2 * (c_eff + setup.get(key, 0.0)) + 0.5:
+                        p.after_fail.discard(n)
             if case_filters:
                 p.ca.notes.append(f"case filters: " + ", ".join(f"{fx}:{len(v)}" for fx, v in case_filters.items()))
             af_ids = [id_of_num[n] for n in sorted(p.after_fail)]
