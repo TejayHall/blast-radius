@@ -275,14 +275,17 @@ def _run_tests(test_ids, per_test_timeout, budget_deadline):
     _run_groups(main_ids, out, per_test_timeout, budget_deadline)
     if late_ids:
         # after a timeout (a change that loops) a giant would most likely loop too: not worth its CPU
-        if _STATE["failed"] and not _STATE.get("timed_out"):
-            _run_groups([t for t in late_ids if not t.startswith("@probe::")], out, per_test_timeout, budget_deadline)
-            for t in late_ids:
-                if t.startswith("@probe::"):
-                    out[t] = _run_probe(t, budget_deadline)
+        looped = _STATE.get("timed_out")
+        giants = [t for t in late_ids if not t.startswith("@probe::")]
+        if _STATE["failed"] and not looped:
+            _run_groups(giants, out, per_test_timeout, budget_deadline)
         else:
-            for tid in late_ids:
+            for tid in giants:
                 out[tid] = "unknown"
+        # probes are cheap and decide a giant whether or not something failed
+        for t in late_ids:
+            if t.startswith("@probe::"):
+                out[t] = "unknown" if looped else _run_probe(t, budget_deadline)
     signal.setitimer(signal.ITIMER_REAL, 0)
     return out
 

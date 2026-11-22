@@ -489,12 +489,13 @@ def main():
             af_ids = [id_of_num[n] for n in sorted(p.after_fail)]
             # test_max_nodes (28.8 s, never verified) only fails when parsing itself is broken: after a failure a
             # scaled-down probe of the same assertions decides whether it stays
+            # (run in every job where it is an unverified candidate: when nothing fails, its release on cheap
+            # evidence also needs the probe to pass - a slower parser or broken node counting passes cheap tests)
             p.maxn_probe = False
             mn = num_of_id.get(MAXN_TEST)
-            if mn is not None and mn in set(p.cand) - set(p.V) and mn in kept_on_fail:
-                if (base_ms - best_schedule(kept_on_fail - {mn}, dur)[0]) / 1000.0 > 1.0:
-                    p.maxn_probe = True
-                    af_ids.append("@probe::max_nodes")
+            if mn is not None and mn in set(p.cand) - set(p.V):
+                p.maxn_probe = True
+                af_ids.append("@probe::max_nodes")
             if af_ids:
                 p.ca.notes.append(f"after-failure giants: {af_ids}")
             jobs.append((p, ids + af_ids, per, {"always": always, "stop_after_fail": True, "case_filters": case_filters,
@@ -558,6 +559,8 @@ def main():
                     exec_pass = sum(1 for n in p.V if dur[n] < CHEAP_MS and id_of_num[n].startswith(EXECUTOR_PREFIX)
                                     and p.verified.get(id_of_num[n]) == "pass")
                     veto = {n for n in giants if _smart_veto(id_of_num[n], p.ca, exec_pass)}
+                    if getattr(p, "maxn_probe", False) and p.verified.get("@probe::max_nodes") != "pass":
+                        veto |= {n for n in giants if id_of_num[n] == MAXN_TEST}  # its probe did not pass
                     if veto:
                         p.ca.notes.append(f"giants kept (smart veto): {sorted(veto)}")
                     giants -= veto
