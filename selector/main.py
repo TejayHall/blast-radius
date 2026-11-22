@@ -34,6 +34,8 @@ HEAVY_PRELOAD = 0.70     # s CPU once: duckdb/pandas/numpy in the zygote
 COST_CALIB = float(os.environ.get("BR_COST_CALIB", "1.0"))
 P_GIANT_PASS = 0.6  # P(a giant candidate passes | the commit breaks another test), labelled kits
 INSURANCE = os.environ.get("BR_INSURANCE", "1") == "1"
+MAIN_GC = os.environ.get("BR_MAIN_GC", "freeze")
+FAST_EXIT = os.environ.get("BR_FAST_EXIT", "1") == "1"  # skip interpreter teardown once the output is out
 GIANT_MS = 9000          # tests this long are never verified; they may be dropped on strong evidence
 CHEAP_MS = 900
 MIN_CHEAP_EVIDENCE = 5
@@ -149,6 +151,11 @@ def main():
     id_of_num = {t["number"]: t["id"] for t in tests}
     ix = Index()
     idx_to_num = [num_of_id.get(tid) for tid in ix.ids]
+    if MAIN_GC == "freeze":
+        # the indexes are long-lived: keep the cyclic GC from re-walking them on every collection
+        import gc
+
+        gc.freeze()
     num_to_idx = {n: i for i, n in enumerate(idx_to_num) if n is not None}
     unknown_nums = sorted(set(dur) - set(num_to_idx))  # tests we have no coverage for
     an = Analyzer(ix, ROOT)
@@ -608,6 +615,7 @@ def main():
             for note in p.ca.notes:
                 log("    " + note)
     sys.stdout.write("\n".join(out) + ("\n" if out else ""))
+    _WROTE[0] = True  # from here on the fallback must never print a second copy
     sys.stdout.flush()
     log(f"total simulated {total_ms/1000:.1f}s, wall {time.monotonic() - t0:.2f}s, insurance cpu {ins_cpu:.3f}s")
 
@@ -660,3 +668,11 @@ if __name__ == "__main__":
         if isinstance(e, SystemExit) and not e.code:
             raise
         _safe_fallback(e)
+    if FAST_EXIT:
+        # everything is written: tearing down the interpreter (modules, indexes, ASTs) is CPU we would be
+        # charged for and nothing reads
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        finally:
+            os._exit(0)
