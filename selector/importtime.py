@@ -185,10 +185,8 @@ def candidates_from_diff(res, ix, keys, analyzer, root, notes, patched_modules=(
                         continue
                     notes.append(f"diff: bisect v1 callers for {tag} (fni={fni_})")
                 else:
-                    c = _class_users(analyzer, ix, keys, path, qual_ if kind_ == "C" else "", res)
-                    notes.append(f"diff: generated function {tag} changed -> class users {len(c)}")
-                    C |= c
-                    continue
+                    # diagnostic: v1 treatment (callers / same-name callers / name users) for functions without a def
+                    notes.append(f"diff: bisect v1 for not-found {tag}")
             typ = "function"
         if typ == "ref":
             # a global that refers to an object defined elsewhere (an import) was added, removed or
