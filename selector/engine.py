@@ -448,6 +448,12 @@ def run_job(root, files, test_ids, per_test_timeout=30.0, budget=120.0, tmpdir="
     return j.verified, stats[0][0], stats[0][1]
 
 
+def _cleanup(path):
+    import shutil
+
+    shutil.rmtree(path, ignore_errors=True)
+
+
 def run_many(root, jobs, deadline, parallel=2, log=None, tmpdir="/tmp/brov", budget_of=None):
     """jobs: list of (plan, test_ids, per_test_timeout). plan.ca.files (or plan.files) is the overlay.
     Sets plan.verified = {test_id: status}. Returns list of (cpu, wall) per job."""
@@ -494,6 +500,7 @@ def run_many(root, jobs, deadline, parallel=2, log=None, tmpdir="/tmp/brov", bud
             k, pid, ts, chunks, _ = running.pop(r)
             os.close(r)
             _, status, ru = os.wait4(pid, 0)
+            _cleanup(os.path.join(tmpdir, str(pid)))  # /tmp is small (64 MB): drop the job's overlay copies
             plan, ids, per = jobs[k][:3]
             res = {}
             if not killed:

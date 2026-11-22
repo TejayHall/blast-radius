@@ -227,6 +227,9 @@ def run_diffs(root, file_sets, parallel=2, timeout=25.0, tmpdir="/tmp/brdiff", d
             k, pid, chunks, _ = running.pop(r)
             os.close(r)
             _, _, ru = os.wait4(pid, 0)
+            import shutil
+
+            shutil.rmtree(os.path.join(tmpdir, "d%d" % pid), ignore_errors=True)  # keep /tmp (64 MB) clear
             cpu = ru.ru_utime + ru.ru_stime
             res = None
             if not killed:
