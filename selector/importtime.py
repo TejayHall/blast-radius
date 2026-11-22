@@ -111,7 +111,7 @@ def _find_def(tree, qual):
 
 
 V1_MAPPING = os.environ.get("BR_V1_MAPPING", "0") == "1"  # diagnostics: v1's broader mapping
-V1_FUNC = V1_MAPPING or os.environ.get("BR_V1_FUNC", "0") == "1"   # code-only function changes -> callers
+V1_FUNC = V1_MAPPING or os.environ.get("BR_V1_FUNC", "1") == "1"   # code-only function changes -> callers
 NO_SUBS = V1_MAPPING or os.environ.get("BR_NO_SUBS", "0") == "1"   # no instance narrowing of class attributes
 
 
