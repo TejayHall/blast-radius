@@ -274,7 +274,8 @@ def _run_tests(test_ids, per_test_timeout, budget_deadline):
     late_ids = [t for t in test_ids if t in _AFTER_FAIL]
     _run_groups(main_ids, out, per_test_timeout, budget_deadline)
     if late_ids:
-        if _STATE["failed"]:
+        # after a timeout (a change that loops) a giant would most likely loop too: not worth its CPU
+        if _STATE["failed"] and not _STATE.get("timed_out"):
             _run_groups([t for t in late_ids if not t.startswith("@probe::")], out, per_test_timeout, budget_deadline)
             for t in late_ids:
                 if t.startswith("@probe::"):
@@ -445,6 +446,7 @@ class _TimedResult(unittest.TestResult):
         tid = self._tid(test)
         if err is not None and err[0] is _Timeout:
             self.status[tid] = "timeout"
+            _STATE["timed_out"] = True
         else:
             self.status[tid] = "fail"
         if os.environ.get("BR_DEBUG_STATUS") and err is not None:
