@@ -95,3 +95,32 @@ def fill_slack(bins, dur, optional):
         else:
             left.append(i)
     return bins, left
+
+
+def fill_insurance(bins, dur, tiers):
+    """Add tests from `tiers` (lists in priority order) into bins wherever they fit without raising the
+    makespan or adding a worker: the cost is the busiest worker plus 2 s per worker, so the other workers'
+    spare capacity is free. Returns the bins and how many tests were added."""
+    if not bins:
+        return bins, 0
+    loads = [sum(dur[i] for i in b) for b in bins]
+    mk = max(loads)
+    have = {i for b in bins for i in b}
+    added = 0
+    for tier in tiers:
+        for i in tier:
+            if i in have:
+                continue
+            d = dur[i]
+            # best fit: the fullest worker that still has room (keeps big gaps for later tests)
+            j = -1
+            for k, ld in enumerate(loads):
+                if ld + d <= mk and (j < 0 or ld > loads[j]):
+                    j = k
+            if j < 0:
+                continue
+            bins[j].append(i)
+            loads[j] += d
+            have.add(i)
+            added += 1
+    return bins, added

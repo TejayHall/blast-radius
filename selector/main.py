@@ -17,7 +17,7 @@ import time
 
 from .analysis import Analyzer
 from .index import Index
-from .pack import best_schedule, fill_slack
+from .pack import best_schedule, fill_insurance, fill_slack
 
 DATA = os.environ.get("BR_DATA", "/data")
 ROOT = os.environ.get("BR_SQLGLOT", "/sqlglot")
@@ -33,6 +33,7 @@ DIFF_COST = 1.0          # s CPU: one differential import (typical)
 HEAVY_PRELOAD = 0.70     # s CPU once: duckdb/pandas/numpy in the zygote
 COST_CALIB = float(os.environ.get("BR_COST_CALIB", "1.0"))
 P_GIANT_PASS = 0.6  # P(a giant candidate passes | the commit breaks another test), labelled kits
+INSURANCE = os.environ.get("BR_INSURANCE", "1") == "1"
 GIANT_MS = 9000          # tests this long are never verified; they may be dropped on strong evidence
 CHEAP_MS = 900
 MIN_CHEAP_EVIDENCE = 5
@@ -507,6 +508,7 @@ def main():
     # ---- final selections ----
     out = []
     total_ms = 0
+    ins_cpu = 0.0
     for p in plans:
         sel = set(p.cand)
         optional = set()
@@ -576,6 +578,28 @@ def main():
         cost, bins = best_schedule(sel, dur)
         if optional and bins:
             bins, _ = fill_slack(bins, dur, optional)
+        if bins and INSURANCE:
+            t_ins = time.process_time()
+            # Free insurance in the spare capacity of non-busiest workers: candidates our own verification
+            # saw pass (in case a local run disagrees with the official one), then every other test that ran
+            # the changed files, then the rest of the suite - smallest first, so as many as possible fit.
+            try:
+                passed = sorted((n for n in p.cand if n not in sel and p.verified
+                                 and p.verified.get(id_of_num[n]) in ("pass", "skip")), key=lambda n: dur[n])
+                near = set()
+                for fp in p.ca.files:
+                    if fp.endswith(".py"):
+                        near |= {idx_to_num[i] for i in ix.file_any(fp) if idx_to_num[i] is not None}
+                    else:
+                        near |= {idx_to_num[i] for i in ix.readers(fp) if idx_to_num[i] is not None}
+                rest = sorted(set(dur) - near - sel, key=lambda n: dur[n])  # anything else: still free
+                near = sorted(near - sel, key=lambda n: dur[n])
+                bins, added = fill_insurance(bins, dur, [passed, near, rest])
+                if added:
+                    p.ca.notes.append(f"insurance: +{added} tests in spare worker capacity (cost unchanged)")
+            except Exception as e:  # noqa: BLE001  insurance is optional: never let it break the output
+                p.ca.notes.append(f"insurance skipped: {e!r}")
+            ins_cpu += time.process_time() - t_ins
         total_ms += cost
         out.append(json.dumps({"commit": p.cid, "workers": bins}, separators=(",", ":")))
         log(f"{p.cid}: kinds={sorted(p.ca.kinds)} cand={len(p.cand)} final={len(sel)} cost={cost/1000:.2f}s"
@@ -585,7 +609,7 @@ def main():
                 log("    " + note)
     sys.stdout.write("\n".join(out) + ("\n" if out else ""))
     sys.stdout.flush()
-    log(f"total simulated {total_ms/1000:.1f}s, wall {time.monotonic() - t0:.2f}s")
+    log(f"total simulated {total_ms/1000:.1f}s, wall {time.monotonic() - t0:.2f}s, insurance cpu {ins_cpu:.3f}s")
 
 
 _WROTE = [False]

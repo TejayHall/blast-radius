@@ -85,6 +85,13 @@ For each $k \le 8$: an exact 2-way split by subset-sum bitset DP, LPT otherwise,
 $\max(\max_t d_t, \lceil \sum d_t / k \rceil)$ pruning. The minimum over $k$ of makespan $+ 2000k$ is
 taken.
 
+**Free insurance.** A commit costs only its busiest worker plus 2 s per worker, so the idle time of the
+other workers costs nothing. After the schedule is fixed, each non-busiest worker is filled (best fit, never
+past the makespan, never on a new worker) with tests that were *not* selected, in this order: candidates our
+own verification saw pass (in case the official run disagrees with the local one), then every other test
+that executed the changed files, then the rest of the suite, smallest first. The cost is unchanged by
+construction, and a miss can only become less likely (`BR_INSURANCE=0` turns it off).
+
 ## 5. Layout
 
 ```
