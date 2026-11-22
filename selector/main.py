@@ -402,11 +402,22 @@ def main():
                 ids.extend(id_of_num[n] for _, n in sorted(by_cls[k]))
             per = {}
             always = []
+            # Once a test fails the job skips the rest (kept unverified), except tests whose removal would cut
+            # the commit's cost by more than verifying them costs, given what stays selected anyway on failure
+            # (every unverified candidate plus a failing test).
+            kept_on_fail = set(p.cand) - set(p.V)
+            if p.V:
+                kept_on_fail.add(min(p.V, key=lambda n: dur[n]))
+            base_ms = best_schedule(kept_on_fail, dur)[0] if kept_on_fail else 0
             for n in p.V:
-                c, _ = p.cost_of(n)
+                c, key = p.cost_of(n)
                 per[id_of_num[n]] = max(2.0, 5.0 * c + 1.0)
-                if c < 0.5 * dur[n] / 1000.0 and dur[n] >= 300 and not (p.probe and n == p.probe[0]):
-                    always.append(id_of_num[n])
+                if (c < 0.5 * dur[n] / 1000.0 and dur[n] >= 300 and not (p.probe and n == p.probe[0])
+                        and n not in kept_on_fail):
+                    gain_ms = best_schedule(kept_on_fail | {n}, dur)[0] - base_ms
+                    # its class may not be set up yet when the failure happens: count setUpClass too
+                    if gain_ms / 1000.0 > 1.2 * (c + setup.get(key, 0.0)) + 0.3:
+                        always.append(id_of_num[n])
             # merge case filters per fixture; only when every reader of that fixture in this job is filtered
             vids = {id_of_num[n] for n in p.V}
             merged = {}

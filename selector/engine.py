@@ -226,6 +226,22 @@ def _alarm(signum, frame):
 _ALWAYS = set()
 TIMES = {}
 _STATE = {"failed": False, "stop_after_fail": False}
+_SKIPPED = set()  # tests we skipped because the change already broke an earlier one
+
+
+def _guard(case, meth, tid):
+    """Wrap the test method so that, once a test has failed, the remaining ones (except _ALWAYS) are skipped from
+    inside the test: unittest calls result.startTest() outside its exception handling, so an exception raised
+    there escapes the whole suite run."""
+    orig = getattr(case, meth)
+
+    def run_or_skip(*a, **k):
+        if _STATE["failed"] and _STATE["stop_after_fail"] and tid not in _ALWAYS:
+            _SKIPPED.add(tid)
+            raise unittest.SkipTest("stopped after first failure")
+        return orig(*a, **k)
+
+    setattr(case, meth, run_or_skip)
 
 
 PYTEST_DEPTH = 40  # stack depth of a test body under pytest-xdist (37 measured) plus a margin
@@ -268,6 +284,11 @@ def _run_tests(test_ids, per_test_timeout, budget_deadline):
             for _, tid in meths:
                 out[tid] = "unknown"
             continue
+        if _STATE["failed"] and _STATE["stop_after_fail"] and not any(tid in _ALWAYS for _, tid in meths):
+            # the change already broke a test: this class stays selected unverified (no setUpClass to pay for)
+            for _, tid in meths:
+                out[tid] = "unknown"
+            continue
         modname = f[:-3].replace("/", ".")
         try:
             if _STATE.get("case_filters"):
@@ -287,6 +308,8 @@ def _run_tests(test_ids, per_test_timeout, budget_deadline):
         except BaseException as e:  # noqa: BLE001  import failure => every test in file fails
             for _, tid in meths:
                 out[tid] = "fail"
+            if os.environ.get("BR_DEBUG_STATUS"):
+                out["__err__" + modname] = repr(e)[:300]
             continue
         suite = unittest.TestSuite()
         cases = {}
@@ -296,6 +319,7 @@ def _run_tests(test_ids, per_test_timeout, budget_deadline):
             except BaseException:  # noqa: BLE001
                 out[tid] = "fail"
                 continue
+            _guard(case, meth, tid)
             cases[id(case)] = tid
             suite.addTest(case)
         result = _TimedResult(per_test_timeout, budget_deadline)
@@ -305,6 +329,8 @@ def _run_tests(test_ids, per_test_timeout, budget_deadline):
             pass
         for tid in cases.values():
             out[tid] = result.status.get(tid, "unknown")
+        if os.environ.get("BR_DEBUG_STATUS"):
+            out.update({k: v for k, v in result.status.items() if k.startswith("__err__")})
         # class-level failure (setUpClass error) marks all as fail
         for tid in cases.values():
             if out[tid] == "unknown" and result.class_error:
@@ -336,11 +362,6 @@ class _TimedResult(unittest.TestResult):
         super().startTest(test)
         tid = self._tid(test)
         self._t0 = time.process_time()
-        if _STATE["failed"] and _STATE["stop_after_fail"] and tid not in _ALWAYS:
-            # the change already breaks something: the rest is cheaper to include than to run
-            self.status[tid] = "unknown"
-            self._ours.add(tid)
-            raise unittest.SkipTest("stopped after first failure")
         self.status[tid] = "pass"
         lim = self.per.get(tid, 30.0) if isinstance(self.per, dict) else self.per
         lim = min(lim, max(0.05, self.deadline - time.monotonic()))
@@ -354,12 +375,18 @@ class _TimedResult(unittest.TestResult):
     def _mark_fail(self, test, err):
         if isinstance(test, unittest.suite._ErrorHolder):  # setUpClass / module fixture error
             self.class_error = True
+            if os.environ.get("BR_DEBUG_STATUS") and err is not None:
+                import traceback as _tb
+                self.status["__err__classerr"] = "".join(_tb.format_exception(*err))[-900:]
             return
         tid = self._tid(test)
         if err is not None and err[0] is _Timeout:
             self.status[tid] = "timeout"
         else:
             self.status[tid] = "fail"
+        if os.environ.get("BR_DEBUG_STATUS") and err is not None:
+            import traceback as _tb
+            self.status["__err__" + tid] = "".join(_tb.format_exception(*err))[-600:]
         _STATE["failed"] = True
 
     # no traceback formatting: only the verdict matters
@@ -378,7 +405,8 @@ class _TimedResult(unittest.TestResult):
 
     def addSkip(self, test, reason):
         tid = self._tid(test)
-        self.status[tid] = "unknown" if tid in self._ours else "skip"
+        # skipped by us after a failure: not verified, so it stays selected
+        self.status[tid] = "unknown" if tid in _SKIPPED else "skip"
 
     def addExpectedFailure(self, test, err):
         return None
@@ -512,6 +540,11 @@ def run_many(root, jobs, deadline, parallel=2, log=None, tmpdir="/tmp/brov", bud
             for tid in ids:
                 res.setdefault(tid, "unknown")
             plan.verified = res
+            if log and os.environ.get("BR_DEBUG_STATUS"):
+                for tid in ids:
+                    log(f"    status {getattr(plan, 'cid', k)} {tid}: {res.get(tid)}")
+                for key in [x for x in res if x.startswith("__err__")]:
+                    log(f"    {key}: {res.pop(key)}")
             if times and log:
                 top = sorted(times.items(), key=lambda kv: -kv[1])[:6]
                 log(f"    times {getattr(plan, 'cid', k)}: " + ", ".join(f"{t.rsplit('::', 1)[-1]}={v}" for t, v in top))

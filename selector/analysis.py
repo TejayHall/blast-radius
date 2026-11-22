@@ -309,7 +309,11 @@ class Analyzer:
             if kind == "ins" and loc.func is not None:
                 # insertion: also anything reaching the neighbouring statements of the block
                 span = (min(span[0], a), max(span[1], a + 1))
-            if loc.func is not None and not (loc.in_header and isinstance(loc.stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))):
+            # a def/class header runs where the def/class statement runs: inside an enclosing function that is
+            # call time (its header lines are covered when the enclosing function reaches it), not import time
+            nested_hdr = (loc.in_header and isinstance(loc.stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                          and isinstance(loc.func, (ast.FunctionDef, ast.AsyncFunctionDef)))
+            if loc.func is not None and (nested_hdr or not (loc.in_header and isinstance(loc.stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))):
                 c = ix.fn_tests(path, *span)
                 ca.kinds.add("py_fn")
                 if path.startswith("sqlglot/") and ix.runs_at_import(path, *span):
