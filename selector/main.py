@@ -234,6 +234,10 @@ def main():
                 p.cand |= fb
                 p.ca.notes.append(f"diff mapping error {e!r}: fallback {len(fb)}")
                 continue
+            if r.get("lazy_changed"):
+                # `import sqlglot` now registers a different number of dialects: the fresh-interpreter test sees it
+                c = set(c) | {ix.pos[t] for t in SUBPROCESS_TESTS if t in ix.pos}
+                p.ca.notes.append("diff: dialect registry after bare import changed -> subprocess tests")
             cn = {idx_to_num[i] for i in c if idx_to_num[i] is not None}
             p.cand |= cn
             p.ca.notes.append(f"diff cpu {cpu:.2f}s: {len(r.get('changes', []))} changes, "

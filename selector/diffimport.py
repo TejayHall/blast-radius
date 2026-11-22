@@ -30,8 +30,20 @@ def _prepare(root):
     import unittest.mock  # noqa: F401
 
 
+def _lazy_signature():
+    """What tests/dialects/test_dialect.py::test_lazy_load observes right after `import sqlglot` in a fresh
+    interpreter: how many dialect classes are registered (it asserts exactly one)."""
+    try:
+        import sqlglot
+
+        return len(sqlglot.Dialect._classes)
+    except BaseException as e:  # noqa: BLE001
+        return f"error:{type(e).__name__}"
+
+
 def build_snapshot(root="/sqlglot", path=STATE_PATH, noisy=None):
     _prepare(root)
+    lazy = _lazy_signature()
     failed = F.import_all()
     snap = F.snapshot(noisy=noisy)
     deps = F.module_deps()
@@ -42,7 +54,7 @@ def build_snapshot(root="/sqlglot", path=STATE_PATH, noisy=None):
     aliases = F.container_aliases()
     with open(path, "wb") as fh:
         marshal.dump({"snap": snap, "failed": failed, "rdeps": rdeps, "noisy": sorted(noisy or ()),
-                      "aliases": aliases}, fh)
+                      "aliases": aliases, "lazy": lazy}, fh)
     return sum(len(v) for v in snap.values()), failed
 
 
@@ -110,6 +122,7 @@ def _child(root, files, w, tmpdir):
         changed_mods = [m for m in (path_to_module(p) for p in files) if m and m.startswith("sqlglot")]
         affected = affected_modules(base, changed_mods)
         failed = {}
+        lazy = _lazy_signature()  # fresh `import sqlglot` under the patch, before anything else loads
         try:
             import sqlglot  # noqa: F401
         except BaseException as e:  # noqa: BLE001
@@ -159,7 +172,9 @@ def _child(root, files, w, tmpdir):
                     seen.add(q)
                     work.extend(c.__subclasses__())
                 subs[qual] = sorted(seen)
-        data = json.dumps({"changes": changes, "failed": new_failed, "subclasses": subs}).encode()
+        lazy_changed = "lazy" in base and lazy != base["lazy"]
+        data = json.dumps({"changes": changes, "failed": new_failed, "subclasses": subs,
+                           "lazy_changed": lazy_changed}).encode()
         view = memoryview(data)
         while view:
             n = os.write(w, view)
