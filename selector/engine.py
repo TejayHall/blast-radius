@@ -227,6 +227,7 @@ _ALWAYS = set()
 TIMES = {}
 _STATE = {"failed": False, "stop_after_fail": False}
 _SKIPPED = set()  # tests we skipped because the change already broke an earlier one
+_AFTER_FAIL = set()  # giants worth running only once the change is known to break something (run last)
 
 
 def _guard(case, meth, tid):
@@ -268,6 +269,21 @@ def _run_tests(test_ids, per_test_timeout, budget_deadline):
 
     _uc.difflib = _NoDiff
     out = {}
+    signal.signal(signal.SIGALRM, _alarm)
+    main_ids = [t for t in test_ids if t not in _AFTER_FAIL]
+    late_ids = [t for t in test_ids if t in _AFTER_FAIL]
+    _run_groups(main_ids, out, per_test_timeout, budget_deadline)
+    if late_ids:
+        if _STATE["failed"]:
+            _run_groups(late_ids, out, per_test_timeout, budget_deadline)
+        else:
+            for tid in late_ids:
+                out[tid] = "unknown"
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    return out
+
+
+def _run_groups(test_ids, out, per_test_timeout, budget_deadline):
     groups = {}
     order = []
     for tid in test_ids:
@@ -277,7 +293,6 @@ def _run_tests(test_ids, per_test_timeout, budget_deadline):
             groups[key] = []
             order.append(key)
         groups[key].append((meth, tid))
-    signal.signal(signal.SIGALRM, _alarm)
     for (f, cls) in order:
         meths = groups[(f, cls)]
         if time.monotonic() > budget_deadline:
@@ -335,8 +350,6 @@ def _run_tests(test_ids, per_test_timeout, budget_deadline):
         for tid in cases.values():
             if out[tid] == "unknown" and result.class_error:
                 out[tid] = "fail"
-    signal.setitimer(signal.ITIMER_REAL, 0)
-    return out
 
 
 class _TimedResult(unittest.TestResult):
@@ -422,6 +435,9 @@ def _child_main(root, files, test_ids, per_test_timeout, budget, tmpdir, w, opts
         if opts:
             _ALWAYS.clear()
             _ALWAYS.update(opts.get("always", ()))
+            _AFTER_FAIL.clear()
+            _AFTER_FAIL.update(opts.get("after_fail", ()))
+            _ALWAYS.update(_AFTER_FAIL)
             _STATE["stop_after_fail"] = bool(opts.get("stop_after_fail"))
             _STATE["case_filters"] = opts.get("case_filters") or {}
         devnull = os.open(os.devnull, os.O_WRONLY)

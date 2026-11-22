@@ -419,8 +419,23 @@ def main():
                     # its class may not be set up yet when the failure happens: count setUpClass too
                     if gain_ms / 1000.0 > 1.2 * (c + setup.get(key, 0.0)) + 0.3:
                         always.append(id_of_num[n])
+            # A giant left unverified (too costly to run blindly) is worth running once the change is known to
+            # break something - it is the busiest worker then - if dropping it cuts the commit's cost by more
+            # than running its relevant cases costs. The engine runs these last, and only after a failure.
+            p.after_fail = set()
+            fx_nums = {idx_to_num[i] for i in p.ca.force_x if idx_to_num[i] is not None}
+            for n in sorted(set(p.cand) - set(p.V)):
+                if (dur[n] < GIANT_MS or (p.probe and n == p.probe[0]) or n in fx_nums
+                        or id_of_num[n] in SUBPROCESS_TESTS or n not in p.cost_scale):
+                    continue
+                c, key = p.cost_of(n)
+                gain_ms = base_ms - best_schedule(kept_on_fail - {n}, dur)[0]
+                if gain_ms / 1000.0 > 1.2 * (c + setup.get(key, 0.0)) + 0.5:
+                    p.after_fail.add(n)
+                    per[id_of_num[n]] = max(2.0, 5.0 * c + 1.0)
+                    p.est += c + setup.get(key, 0.0)  # the job's time budget derives from est
             # merge case filters per fixture; only when every reader of that fixture in this job is filtered
-            vids = {id_of_num[n] for n in p.V}
+            vids = {id_of_num[n] for n in p.V | p.after_fail}
             merged = {}
             blocked = set()
             for tid in vids:
@@ -439,9 +454,16 @@ def main():
                     if tid not in p.filters and fx in get_cases().fixtures(tid):
                         blocked.add(fx)
             case_filters = {fx: sorted(v) for fx, v in merged.items() if fx not in blocked}
+            for n in list(p.after_fail):
+                if any(fx not in case_filters for fx in p.filters.get(id_of_num[n], {})):
+                    p.after_fail.discard(n)  # its filter is blocked: it would run in full
             if case_filters:
                 p.ca.notes.append(f"case filters: " + ", ".join(f"{fx}:{len(v)}" for fx, v in case_filters.items()))
-            jobs.append((p, ids, per, {"always": always, "stop_after_fail": True, "case_filters": case_filters}))
+            af_ids = [id_of_num[n] for n in sorted(p.after_fail)]
+            if af_ids:
+                p.ca.notes.append(f"after-failure giants: {af_ids}")
+            jobs.append((p, ids + af_ids, per, {"always": always, "stop_after_fail": True, "case_filters": case_filters,
+                                                "after_fail": af_ids}))
         stats = engine.run_many(ROOT, jobs, deadline, parallel=2, log=log)
         for job, (cpu, wall) in zip(jobs, stats):
             job[0].vcpu = cpu
@@ -456,9 +478,18 @@ def main():
             if p.verified is not None and set(p.verified) >= {id_of_num[n] for n in p.V}:
                 keep = set()
                 bad = False
+                af = getattr(p, "after_fail", set())
+                af_pass = set()
                 for tid, st in p.verified.items():
                     n = num_of_id.get(tid)
                     if n is None:
+                        continue
+                    if n in af:
+                        # run only after a failure: not run = unverified as before; passed = drop; else keep
+                        if st in ("pass", "skip"):
+                            af_pass.add(n)
+                        elif st != "unknown":
+                            keep.add(n)
                         continue
                     if st in ("pass", "skip"):
                         continue
@@ -474,7 +505,9 @@ def main():
                         keep.add(pn)  # the giant stays unless its probe passed on clean evidence
                     else:
                         p.ca.notes.append(f"giant {pn} released: probe on {len(p.probe[1])} queries passed")
-                unverified = p.cand - p.V
+                unverified = p.cand - p.V - af_pass
+                if af_pass:
+                    p.ca.notes.append(f"giants released after the failure: {sorted(af_pass)} passed")
                 giants = {n for n in unverified if dur[n] >= GIANT_MS}
                 anomaly = p.vcpu is not None and p.vcpu > 3.0 * p.est + 0.5
                 small_v = sum(1 for n in p.V if dur[n] < CHEAP_MS)
